@@ -27,6 +27,8 @@ public class App {
     static final int CHUNK_SIZE = 16;
     static final int WORLD_HEIGHT = 64;
     static final int RENDER_DISTANCE = 6;
+    static final int CHUNK_MESH_BUILD_BUDGET = 2;
+    static final float VIEW_DISTANCE = 64.0f;
 
     static final float PLAYER_WIDTH = 0.60f;
     static final float PLAYER_HEIGHT = 1.80f;
@@ -48,6 +50,8 @@ public class App {
     static final class Chunk {
         final int cx, cz;
         boolean generated;
+        int displayList;
+        boolean meshDirty = true;
         final byte[] blocks = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
         final byte[] light = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
 
@@ -163,6 +167,7 @@ public class App {
 
         loop();
 
+        disposeChunkMeshes(world);
         glfwDestroyWindow(window);
         glfwTerminate();
     }
@@ -345,38 +350,155 @@ public class App {
         glTranslatef(-player.x, -(player.y + PLAYER_EYE), -player.z);
 
         drawGrid(64, 1.0f);
-        drawWorld();
+        drawWorld(aspect);
         drawHud(width, height);
     }
 
-    static void drawWorld() {
+    static void drawWorld(float aspect) {
         int pcx = (int)Math.floor(player.x / CHUNK_SIZE);
         int pcz = (int)Math.floor(player.z / CHUNK_SIZE);
+        ArrayList<Chunk> visibleChunks = new ArrayList<>();
 
         for (int cz = pcz - RENDER_DISTANCE; cz <= pcz + RENDER_DISTANCE; cz++) {
             for (int cx = pcx - RENDER_DISTANCE; cx <= pcx + RENDER_DISTANCE; cx++) {
                 Chunk c = getChunk(cx, cz, false);
                 if (c == null || !c.generated) continue;
+                if (!isChunkInView(c, aspect)) continue;
+                visibleChunks.add(c);
+            }
+        }
+        visibleChunks.sort(Comparator.comparingDouble(chunk -> {
+            float dx = (chunk.cx + 0.5f) * CHUNK_SIZE - player.x;
+            float dz = (chunk.cz + 0.5f) * CHUNK_SIZE - player.z;
+            return dx * dx + dz * dz;
+        }));
 
-                for (int x = 0; x < CHUNK_SIZE; x++) {
-                    for (int y = 0; y < WORLD_HEIGHT; y++) {
-                        for (int z = 0; z < CHUNK_SIZE; z++) {
-                            BlockType t = getBlock(c, x, y, z);
-                            if (t == BlockType.AIR) continue;
+        int meshBuilds = 0;
+        for (Chunk chunk : visibleChunks) {
+            if ((chunk.displayList == 0 || chunk.meshDirty)
+                    && meshBuilds >= CHUNK_MESH_BUILD_BUDGET) continue;
+            if (chunk.displayList == 0 || chunk.meshDirty) meshBuilds++;
+            drawChunk(chunk);
+        }
+    }
 
-                            int wx = cx * CHUNK_SIZE + x;
-                            int wz = cz * CHUNK_SIZE + z;
+    static boolean isChunkInView(Chunk chunk, float aspect) {
+        float centerX = (chunk.cx + 0.5f) * CHUNK_SIZE;
+        float centerY = WORLD_HEIGHT * 0.5f;
+        float centerZ = (chunk.cz + 0.5f) * CHUNK_SIZE;
+        float dx = centerX - player.x;
+        float dy = centerY - (player.y + PLAYER_EYE);
+        float dz = centerZ - player.z;
 
-                            // 너무 멀면 생략
-                            float dx = wx + 0.5f - player.x;
-                            float dy = y + 0.5f - (player.y + PLAYER_EYE);
-                            float dz = wz + 0.5f - player.z;
-                            if (dx * dx + dy * dy + dz * dz > 90.0f * 90.0f) continue;
+        float halfX = CHUNK_SIZE * 0.5f;
+        float halfY = WORLD_HEIGHT * 0.5f;
+        float halfZ = CHUNK_SIZE * 0.5f;
+        float radius = (float)Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+        float nearestX = Math.max(0.0f, Math.abs(dx) - halfX);
+        float nearestZ = Math.max(0.0f, Math.abs(dz) - halfZ);
+        if (nearestX * nearestX + nearestZ * nearestZ > VIEW_DISTANCE * VIEW_DISTANCE) return false;
 
-                            drawBlock(wx, y, wz, t);
+        float yaw = player.yaw;
+        float pitch = player.pitch;
+        float sinYaw = (float)Math.sin(yaw);
+        float cosYaw = (float)Math.cos(yaw);
+        float sinPitch = (float)Math.sin(pitch);
+        float cosPitch = (float)Math.cos(pitch);
+        float forwardX = cosPitch * sinYaw;
+        float forwardY = sinPitch;
+        float forwardZ = cosPitch * cosYaw;
+        float rightX = cosYaw;
+        float rightZ = -sinYaw;
+        float upX = -sinPitch * sinYaw;
+        float upY = cosPitch;
+        float upZ = -sinPitch * cosYaw;
+        float tanHalfVertical = (float)Math.tan(Math.toRadians(70.0) * 0.5);
+        float tanHalfHorizontal = tanHalfVertical * aspect;
+
+        return !outsideFrustumPlane(forwardX, forwardY, forwardZ, dx, dy, dz,
+                        halfX, halfY, halfZ)
+                && !outsideFrustumPlane(forwardX * tanHalfHorizontal + rightX,
+                        forwardY * tanHalfHorizontal, forwardZ * tanHalfHorizontal + rightZ,
+                        dx, dy, dz, halfX, halfY, halfZ)
+                && !outsideFrustumPlane(forwardX * tanHalfHorizontal - rightX,
+                        forwardY * tanHalfHorizontal, forwardZ * tanHalfHorizontal - rightZ,
+                        dx, dy, dz, halfX, halfY, halfZ)
+                && !outsideFrustumPlane(forwardX * tanHalfVertical + upX,
+                        forwardY * tanHalfVertical + upY, forwardZ * tanHalfVertical + upZ,
+                        dx, dy, dz, halfX, halfY, halfZ)
+                && !outsideFrustumPlane(forwardX * tanHalfVertical - upX,
+                        forwardY * tanHalfVertical - upY, forwardZ * tanHalfVertical - upZ,
+                        dx, dy, dz, halfX, halfY, halfZ);
+    }
+
+    static boolean outsideFrustumPlane(float normalX, float normalY, float normalZ,
+                                       float dx, float dy, float dz,
+                                       float halfX, float halfY, float halfZ) {
+        float distance = normalX * dx + normalY * dy + normalZ * dz;
+        float radius = Math.abs(normalX) * halfX
+                + Math.abs(normalY) * halfY
+                + Math.abs(normalZ) * halfZ;
+        return distance + radius < 0.0f;
+    }
+
+    static void drawChunk(Chunk chunk) {
+        if (chunk.displayList == 0) {
+            chunk.displayList = glGenLists(1);
+            if (chunk.displayList == 0) {
+                throw new IllegalStateException("Could not allocate chunk display list");
+            }
+            chunk.meshDirty = true;
+        }
+        if (chunk.meshDirty) {
+            glNewList(chunk.displayList, GL_COMPILE);
+            for (int x = 0; x < CHUNK_SIZE; x++) {
+                for (int y = 0; y < WORLD_HEIGHT; y++) {
+                    for (int z = 0; z < CHUNK_SIZE; z++) {
+                        BlockType block = getBlock(chunk, x, y, z);
+                        if (block != BlockType.AIR) {
+                            drawBlock(chunk.cx * CHUNK_SIZE + x, y,
+                                    chunk.cz * CHUNK_SIZE + z, block);
                         }
                     }
                 }
+            }
+            glEndList();
+            chunk.meshDirty = false;
+        }
+        glCallList(chunk.displayList);
+    }
+
+    static void invalidateChunkMesh(Chunk chunk) {
+        if (chunk == null) return;
+        chunk.meshDirty = true;
+        if (chunk.displayList != 0) {
+            glDeleteLists(chunk.displayList, 1);
+            chunk.displayList = 0;
+        }
+    }
+
+    static void invalidateChunkAndNeighbors(Chunk chunk, int localX, int localZ) {
+        invalidateChunkMesh(chunk);
+        if (localX == 0) invalidateChunkMesh(getChunk(chunk.cx - 1, chunk.cz, false));
+        if (localX == CHUNK_SIZE - 1) invalidateChunkMesh(getChunk(chunk.cx + 1, chunk.cz, false));
+        if (localZ == 0) invalidateChunkMesh(getChunk(chunk.cx, chunk.cz - 1, false));
+        if (localZ == CHUNK_SIZE - 1) invalidateChunkMesh(getChunk(chunk.cx, chunk.cz + 1, false));
+    }
+
+    static void invalidateChunkBorders(Chunk chunk) {
+        invalidateChunkMesh(chunk);
+        invalidateChunkMesh(getChunk(chunk.cx - 1, chunk.cz, false));
+        invalidateChunkMesh(getChunk(chunk.cx + 1, chunk.cz, false));
+        invalidateChunkMesh(getChunk(chunk.cx, chunk.cz - 1, false));
+        invalidateChunkMesh(getChunk(chunk.cx, chunk.cz + 1, false));
+    }
+
+    static void disposeChunkMeshes(World targetWorld) {
+        for (Chunk chunk : targetWorld.chunks.values()) {
+            if (chunk.displayList != 0) {
+                glDeleteLists(chunk.displayList, 1);
+                chunk.displayList = 0;
+                chunk.meshDirty = true;
             }
         }
     }
@@ -677,7 +799,10 @@ public class App {
         int cz = floorDiv(z, CHUNK_SIZE);
         Chunk chunk = getChunk(cx, cz, true);
         if (!chunk.generated) generateChunk(chunk);
-        setBlock(chunk, floorMod(x, CHUNK_SIZE), y, floorMod(z, CHUNK_SIZE), block);
+        int localX = floorMod(x, CHUNK_SIZE);
+        int localZ = floorMod(z, CHUNK_SIZE);
+        setBlock(chunk, localX, y, localZ, block);
+        invalidateChunkAndNeighbors(chunk, localX, localZ);
     }
 
     static void saveWorld() throws IOException {
@@ -789,6 +914,7 @@ public class App {
             }
             if (input.read() != -1) throw new IOException("Unexpected data after save file");
 
+            disposeChunkMeshes(world);
             world = loadedWorld;
             player = loadedPlayer;
             inventory = loadedInventory;
@@ -903,6 +1029,7 @@ public class App {
         }
 
         c.generated = true;
+        invalidateChunkBorders(c);
     }
 
     static void placeTree(Chunk c, int x, int y, int z) {
@@ -1050,7 +1177,7 @@ public class App {
 
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        glFrustum(left, right, bottom, top, zNear, zFar);
+        glFrustum(left, right, bottom, top, zNear, Math.min(zFar, VIEW_DISTANCE + CHUNK_SIZE));
         glMatrixMode(GL_MODELVIEW);
     }
 

@@ -67,6 +67,32 @@ class AppTest {
     }
 
     @Test
+    void chunkCullingRejectsBehindAndBeyondViewDistance() {
+        App.player.x = 8.0f;
+        App.player.y = 20.0f;
+        App.player.z = 8.0f;
+        App.player.yaw = 0.0f;
+        App.player.pitch = 0.0f;
+        App.Chunk ahead = new App.Chunk(0, 1);
+        App.Chunk behind = new App.Chunk(0, -1);
+        App.Chunk tooFar = new App.Chunk(5, 0);
+
+        assertTrue(App.isChunkInView(ahead, 16.0f / 9.0f));
+        assertFalse(App.isChunkInView(behind, 16.0f / 9.0f));
+        assertFalse(App.isChunkInView(tooFar, 16.0f / 9.0f));
+    }
+
+    @Test
+    void editingChunkInvalidatesItsCachedMesh() {
+        App.Chunk chunk = App.world.chunks.get(App.key(0, 0));
+        chunk.meshDirty = false;
+
+        App.setWorldBlock(3, 2, 0, App.BlockType.DIRT);
+
+        assertTrue(chunk.meshDirty);
+    }
+
+    @Test
     void savedWorldRestoresBlocksPlayerAndInventory(@TempDir Path directory) throws IOException {
         App.player.x = 12.5f;
         App.player.yaw = 1.25f;
