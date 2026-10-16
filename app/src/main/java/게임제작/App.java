@@ -3,9 +3,17 @@ package 게임제작;
 import org.lwjgl.glfw.GLFWErrorCallback;
 import org.lwjgl.opengl.GL;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
 
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL11.*;
@@ -27,6 +35,11 @@ public class App {
     static final float JUMP_VEL = 8.5f;
     static final float MOVE_SPEED = 6.0f;
     static final float RUN_SPEED = 9.5f;
+    static final float REACH_DISTANCE = 6.0f;
+    static final int SAVE_MAGIC = 0x4D574C44;
+    static final int SAVE_VERSION = 1;
+    static final Path SAVE_PATH = Path.of(System.getProperty("user.home"),
+            ".mineworld-game-project", "world.dat");
 
     enum BlockType {
         AIR, GRASS, DIRT, STONE, WOOD, LEAF, WATER, TORCH, COBBLE, SAND
@@ -94,6 +107,8 @@ public class App {
         }
     }
 
+    record BlockHit(int x, int y, int z, int previousX, int previousY, int previousZ) {}
+
     static long window;
     static World world;
     static Player player;
@@ -101,6 +116,15 @@ public class App {
 
     static int fpsCounter = 0;
     static double fpsTimer = 0.0;
+    static int displayedFps = 0;
+    static String statusMessage = "";
+    static double statusTimer = 0.0;
+    static boolean leftMouseWasDown;
+    static boolean rightMouseWasDown;
+    static boolean saveKeyWasDown;
+    static boolean loadKeyWasDown;
+    static boolean escapeKeyWasDown;
+    static boolean captureKeyWasDown;
 
     public static void main(String[] args) {
         GLFWErrorCallback.createPrint(System.err).set();
@@ -114,7 +138,7 @@ public class App {
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-        window = glfwCreateWindow(SCREEN_W, SCREEN_H, "Minecraft Clone - Single File", NULL, NULL);
+        window = glfwCreateWindow(SCREEN_W, SCREEN_H, "Mineworld", NULL, NULL);
         if (window == NULL) {
             throw new IllegalStateException("Window creation failed");
         }
@@ -132,6 +156,7 @@ public class App {
 
         world = new World();
         player = new Player();
+        player.y = Math.max(terrainHeight((int)player.x, (int)player.z), 10);
         inventory = new Inventory();
 
         ensureWorldAround(player.x, player.z);
@@ -154,8 +179,12 @@ public class App {
             fpsTimer += dt;
             fpsCounter++;
             if (fpsTimer >= 1.0) {
+                displayedFps = fpsCounter;
                 fpsTimer = 0.0;
                 fpsCounter = 0;
+                glfwSetWindowTitle(window, statusTimer > 0.0
+                        ? "Mineworld | " + displayedFps + " FPS | " + statusMessage
+                        : "Mineworld | " + displayedFps + " FPS");
             }
 
             update(dt);
@@ -167,12 +196,21 @@ public class App {
     }
 
     static void update(float dt) {
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        statusTimer = Math.max(0.0, statusTimer - dt);
+        boolean escapeDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+        boolean captureDown = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
+        if (escapeDown && !escapeKeyWasDown) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         }
-        if (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS) {
+        if (captureDown && !captureKeyWasDown) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            int[] width = new int[1];
+            int[] height = new int[1];
+            glfwGetWindowSize(window, width, height);
+            glfwSetCursorPos(window, width[0] * 0.5, height[0] * 0.5);
         }
+        escapeKeyWasDown = escapeDown;
+        captureKeyWasDown = captureDown;
 
         for (int i = 0; i < 9; i++) {
             int key = GLFW_KEY_1 + i;
@@ -181,20 +219,21 @@ public class App {
             }
         }
 
-        double[] mx = new double[1];
-        double[] my = new double[1];
-        glfwGetCursorPos(window, mx, my);
-
-        // 마우스 델타는 원래는 callback으로 처리하는 게 더 낫지만,
-        // 지금은 단순화를 위해 커서 잠금 상태에서 매 프레임 누적만 사용.
-        // 실제 구현에서는 이전 좌표를 저장하세요.
         float mouseDX = 0.0f;
         float mouseDY = 0.0f;
 
         if (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
-            mouseDX = (float)mx[0] - SCREEN_W * 0.5f;
-            mouseDY = (float)my[0] - SCREEN_H * 0.5f;
-            glfwSetCursorPos(window, SCREEN_W * 0.5, SCREEN_H * 0.5);
+            double[] mx = new double[1];
+            double[] my = new double[1];
+            int[] width = new int[1];
+            int[] height = new int[1];
+            glfwGetCursorPos(window, mx, my);
+            glfwGetWindowSize(window, width, height);
+            double centerX = width[0] * 0.5;
+            double centerY = height[0] * 0.5;
+            mouseDX = (float)(mx[0] - centerX);
+            mouseDY = (float)(my[0] - centerY);
+            glfwSetCursorPos(window, centerX, centerY);
 
             player.yaw += mouseDX * 0.0032f;
             player.pitch -= mouseDY * 0.0032f;
@@ -252,25 +291,50 @@ public class App {
 
         moveWithCollision(dt);
 
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+        boolean leftMouseDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        boolean rightMouseDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        if (leftMouseDown && !leftMouseWasDown) {
             raycastBreak(fx, fy, fz);
         }
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+        if (rightMouseDown && !rightMouseWasDown) {
             raycastPlace(fx, fy, fz);
         }
+        leftMouseWasDown = leftMouseDown;
+        rightMouseWasDown = rightMouseDown;
 
-        if (glfwGetKey(window, GLFW_KEY_F5) == GLFW_PRESS) {
-            // saveWorld();
+        boolean saveDown = glfwGetKey(window, GLFW_KEY_F5) == GLFW_PRESS;
+        boolean loadDown = glfwGetKey(window, GLFW_KEY_F9) == GLFW_PRESS;
+        if (saveDown && !saveKeyWasDown) {
+            try {
+                saveWorld();
+                setStatus("World saved");
+            } catch (IOException e) {
+                reportPersistenceError("Could not save world", e);
+            }
         }
-        if (glfwGetKey(window, GLFW_KEY_F9) == GLFW_PRESS) {
-            // loadWorld();
+        if (loadDown && !loadKeyWasDown) {
+            try {
+                loadWorld();
+                ensureWorldAround(player.x, player.z);
+                setStatus("World loaded");
+            } catch (IOException e) {
+                reportPersistenceError("Could not load world", e);
+            }
         }
+        saveKeyWasDown = saveDown;
+        loadKeyWasDown = loadDown;
     }
 
     static void render() {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        float aspect = (float) SCREEN_W / (float) SCREEN_H;
+        int[] framebufferWidth = new int[1];
+        int[] framebufferHeight = new int[1];
+        glfwGetFramebufferSize(window, framebufferWidth, framebufferHeight);
+        int width = Math.max(1, framebufferWidth[0]);
+        int height = Math.max(1, framebufferHeight[0]);
+        glViewport(0, 0, width, height);
+        float aspect = (float) width / (float) height;
         setPerspective(70.0f, aspect, 0.1f, 1000.0f);
 
         glMatrixMode(GL_MODELVIEW);
@@ -282,11 +346,7 @@ public class App {
 
         drawGrid(64, 1.0f);
         drawWorld();
-
-        // 창 제목에 FPS 표시
-        if (fpsCounter > 0) {
-            glfwSetWindowTitle(window, "Minecraft Clone - Single File");
-        }
+        drawHud(width, height);
     }
 
     static void drawWorld() {
@@ -322,13 +382,14 @@ public class App {
     }
 
     static void drawBlock(int x, int y, int z, BlockType t) {
-        float[] c = colorOf(t);
-
-        if (t == BlockType.WATER) {
-            c[3] = 0.65f;
-        }
-
-        glColor4f(c[0], c[1], c[2], c[3]);
+        boolean frontVisible = isFaceVisible(x, y, z + 1);
+        boolean backVisible = isFaceVisible(x, y, z - 1);
+        boolean leftVisible = isFaceVisible(x - 1, y, z);
+        boolean rightVisible = isFaceVisible(x + 1, y, z);
+        boolean topVisible = isFaceVisible(x, y + 1, z);
+        boolean bottomVisible = isFaceVisible(x, y - 1, z);
+        if (!frontVisible && !backVisible && !leftVisible && !rightVisible
+                && !topVisible && !bottomVisible) return;
 
         float x0 = x;
         float y0 = y;
@@ -337,45 +398,56 @@ public class App {
         float y1 = y + 1;
         float z1 = z + 1;
 
+        float[] color = colorOf(t);
         glBegin(GL_QUADS);
-
-        // front
-        glVertex3f(x0, y0, z1);
-        glVertex3f(x1, y0, z1);
-        glVertex3f(x1, y1, z1);
-        glVertex3f(x0, y1, z1);
-
-        // back
-        glVertex3f(x1, y0, z0);
-        glVertex3f(x0, y0, z0);
-        glVertex3f(x0, y1, z0);
-        glVertex3f(x1, y1, z0);
-
-        // left
-        glVertex3f(x0, y0, z0);
-        glVertex3f(x0, y0, z1);
-        glVertex3f(x0, y1, z1);
-        glVertex3f(x0, y1, z0);
-
-        // right
-        glVertex3f(x1, y0, z1);
-        glVertex3f(x1, y0, z0);
-        glVertex3f(x1, y1, z0);
-        glVertex3f(x1, y1, z1);
-
-        // top
-        glVertex3f(x0, y1, z1);
-        glVertex3f(x1, y1, z1);
-        glVertex3f(x1, y1, z0);
-        glVertex3f(x0, y1, z0);
-
-        // bottom
-        glVertex3f(x0, y0, z0);
-        glVertex3f(x1, y0, z0);
-        glVertex3f(x1, y0, z1);
-        glVertex3f(x0, y0, z1);
-
+        if (frontVisible) {
+            setBlockFaceColor(color, 0.82f);
+            glVertex3f(x0, y0, z1);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x1, y1, z1);
+            glVertex3f(x0, y1, z1);
+        }
+        if (backVisible) {
+            setBlockFaceColor(color, 0.68f);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x0, y1, z0);
+            glVertex3f(x1, y1, z0);
+        }
+        if (leftVisible) {
+            setBlockFaceColor(color, 0.76f);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x0, y0, z1);
+            glVertex3f(x0, y1, z1);
+            glVertex3f(x0, y1, z0);
+        }
+        if (rightVisible) {
+            setBlockFaceColor(color, 0.88f);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x1, y1, z0);
+            glVertex3f(x1, y1, z1);
+        }
+        if (topVisible) {
+            setBlockFaceColor(color, 1.0f);
+            glVertex3f(x0, y1, z1);
+            glVertex3f(x1, y1, z1);
+            glVertex3f(x1, y1, z0);
+            glVertex3f(x0, y1, z0);
+        }
+        if (bottomVisible) {
+            setBlockFaceColor(color, 0.55f);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x0, y0, z1);
+        }
         glEnd();
+    }
+
+    static void setBlockFaceColor(float[] color, float brightness) {
+        glColor4f(color[0] * brightness, color[1] * brightness,
+                color[2] * brightness, color[3]);
     }
 
     static void drawGrid(int count, float spacing) {
@@ -391,13 +463,347 @@ public class App {
         glEnd();
     }
 
+    static void drawHud(int width, int height) {
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, width, height, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        float centerX = width * 0.5f;
+        float centerY = height * 0.5f;
+        glColor4f(0.05f, 0.05f, 0.05f, 0.75f);
+        glBegin(GL_QUADS);
+        glVertex2f(centerX - 1.5f, centerY - 8.0f);
+        glVertex2f(centerX + 1.5f, centerY - 8.0f);
+        glVertex2f(centerX + 1.5f, centerY + 8.0f);
+        glVertex2f(centerX - 1.5f, centerY + 8.0f);
+        glVertex2f(centerX - 8.0f, centerY - 1.5f);
+        glVertex2f(centerX + 8.0f, centerY - 1.5f);
+        glVertex2f(centerX + 8.0f, centerY + 1.5f);
+        glVertex2f(centerX - 8.0f, centerY + 1.5f);
+        glEnd();
+
+        int slotSize = 44;
+        int gap = 3;
+        int barWidth = slotSize * inventory.hotbar.length + gap * (inventory.hotbar.length - 1);
+        int startX = (width - barWidth) / 2;
+        int top = height - slotSize - 18;
+        for (int i = 0; i < inventory.hotbar.length; i++) {
+            int x = startX + i * (slotSize + gap);
+            glColor4f(0.04f, 0.04f, 0.04f, 0.78f);
+            drawHudRect(x, top, slotSize, slotSize);
+            glColor4f(i == inventory.selected ? 1.0f : 0.55f,
+                    i == inventory.selected ? 0.85f : 0.55f,
+                    i == inventory.selected ? 0.25f : 0.55f, 0.95f);
+            drawHudOutline(x, top, slotSize, slotSize, i == inventory.selected ? 3 : 1);
+
+            float[] color = colorOf(inventory.hotbar[i]);
+            glColor4f(color[0], color[1], color[2], color[3]);
+            drawHudRect(x + 13, top + 11, 18, 18);
+            int count = inventory.counts[inventory.hotbar[i].ordinal()];
+            if (count > 0) {
+                glColor4f(0.95f, 0.95f, 0.95f, 0.95f);
+                drawHudRect(x + 5, top + slotSize - 5,
+                        Math.max(2, (slotSize - 10) * Math.min(count, 64) / 64), 2);
+            }
+        }
+
+        glDisable(GL_BLEND);
+        glEnable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+    }
+
+    static void drawHudRect(float x, float y, float width, float height) {
+        glBegin(GL_QUADS);
+        glVertex2f(x, y);
+        glVertex2f(x + width, y);
+        glVertex2f(x + width, y + height);
+        glVertex2f(x, y + height);
+        glEnd();
+    }
+
+    static void drawHudOutline(float x, float y, float width, float height, float thickness) {
+        glBegin(GL_QUADS);
+        glVertex2f(x, y);
+        glVertex2f(x + width, y);
+        glVertex2f(x + width, y + thickness);
+        glVertex2f(x, y + thickness);
+        glVertex2f(x, y + height - thickness);
+        glVertex2f(x + width, y + height - thickness);
+        glVertex2f(x + width, y + height);
+        glVertex2f(x, y + height);
+        glVertex2f(x, y + thickness);
+        glVertex2f(x + thickness, y + thickness);
+        glVertex2f(x + thickness, y + height - thickness);
+        glVertex2f(x, y + height - thickness);
+        glVertex2f(x + width - thickness, y + thickness);
+        glVertex2f(x + width, y + thickness);
+        glVertex2f(x + width, y + height - thickness);
+        glVertex2f(x + width - thickness, y + height - thickness);
+        glEnd();
+    }
+
     static void raycastBreak(float fx, float fy, float fz) {
-        // 아주 단순한 예시
-        // 실제로는 당신 C 코드의 RaycastBlocks 로직을 그대로 Java로 옮기면 됩니다.
+        BlockHit hit = raycastFrom(player.x, player.y + PLAYER_EYE, player.z, fx, fy, fz);
+        if (hit != null) {
+            breakBlock(hit);
+        }
     }
 
     static void raycastPlace(float fx, float fy, float fz) {
-        // break와 동일한 방식으로 직전 공기 블록에 설치
+        BlockHit hit = raycastFrom(player.x, player.y + PLAYER_EYE, player.z, fx, fy, fz);
+        if (hit != null) {
+            placeBlock(hit, inventory.selectedBlock());
+        }
+    }
+
+    static BlockHit raycastFrom(float originX, float originY, float originZ,
+                                float directionX, float directionY, float directionZ) {
+        float directionLength = (float)Math.sqrt(directionX * directionX
+                + directionY * directionY + directionZ * directionZ);
+        if (directionLength == 0.0f) return null;
+        directionX /= directionLength;
+        directionY /= directionLength;
+        directionZ /= directionLength;
+
+        int x = (int)Math.floor(originX);
+        int y = (int)Math.floor(originY);
+        int z = (int)Math.floor(originZ);
+        if (getBlock(x, y, z) != BlockType.AIR) {
+            return new BlockHit(x, y, z, x, y, z);
+        }
+
+        int stepX = directionX > 0.0f ? 1 : directionX < 0.0f ? -1 : 0;
+        int stepY = directionY > 0.0f ? 1 : directionY < 0.0f ? -1 : 0;
+        int stepZ = directionZ > 0.0f ? 1 : directionZ < 0.0f ? -1 : 0;
+        float deltaX = stepX == 0 ? Float.POSITIVE_INFINITY : Math.abs(1.0f / directionX);
+        float deltaY = stepY == 0 ? Float.POSITIVE_INFINITY : Math.abs(1.0f / directionY);
+        float deltaZ = stepZ == 0 ? Float.POSITIVE_INFINITY : Math.abs(1.0f / directionZ);
+        float maxX = stepX == 0 ? Float.POSITIVE_INFINITY
+                : (stepX > 0 ? x + 1.0f - originX : originX - x) * deltaX;
+        float maxY = stepY == 0 ? Float.POSITIVE_INFINITY
+                : (stepY > 0 ? y + 1.0f - originY : originY - y) * deltaY;
+        float maxZ = stepZ == 0 ? Float.POSITIVE_INFINITY
+                : (stepZ > 0 ? z + 1.0f - originZ : originZ - z) * deltaZ;
+
+        int previousX = x;
+        int previousY = y;
+        int previousZ = z;
+        while (true) {
+            float distance;
+            if (maxX <= maxY && maxX <= maxZ) {
+                distance = maxX;
+                previousX = x;
+                previousY = y;
+                previousZ = z;
+                x += stepX;
+                maxX += deltaX;
+            } else if (maxY <= maxZ) {
+                distance = maxY;
+                previousX = x;
+                previousY = y;
+                previousZ = z;
+                y += stepY;
+                maxY += deltaY;
+            } else {
+                distance = maxZ;
+                previousX = x;
+                previousY = y;
+                previousZ = z;
+                z += stepZ;
+                maxZ += deltaZ;
+            }
+            if (distance > REACH_DISTANCE) return null;
+            if (getBlock(x, y, z) != BlockType.AIR) {
+                return new BlockHit(x, y, z, previousX, previousY, previousZ);
+            }
+        }
+    }
+
+    static boolean breakBlock(BlockHit hit) {
+        BlockType block = getBlock(hit.x(), hit.y(), hit.z());
+        if (block == BlockType.AIR) return false;
+        setWorldBlock(hit.x(), hit.y(), hit.z(), BlockType.AIR);
+        if (inventory != null && block != BlockType.WATER) {
+            int slot = block.ordinal();
+            inventory.counts[slot] = Math.min(9999, inventory.counts[slot] + 1);
+        }
+        return true;
+    }
+
+    static boolean placeBlock(BlockHit hit, BlockType block) {
+        if (block == null || block == BlockType.AIR) return false;
+        if (getBlock(hit.x(), hit.y(), hit.z()) == BlockType.AIR) return false;
+        if (getBlock(hit.previousX(), hit.previousY(), hit.previousZ()) != BlockType.AIR) return false;
+        if (inventory != null && inventory.counts[block.ordinal()] <= 0) return false;
+        if (intersectsPlayerBlock(hit.previousX(), hit.previousY(), hit.previousZ())) return false;
+        setWorldBlock(hit.previousX(), hit.previousY(), hit.previousZ(), block);
+        if (inventory != null) inventory.counts[block.ordinal()]--;
+        return true;
+    }
+
+    static boolean intersectsPlayerBlock(int x, int y, int z) {
+        float playerMinX = player.x - PLAYER_WIDTH * 0.5f;
+        float playerMaxX = player.x + PLAYER_WIDTH * 0.5f;
+        float playerMinY = player.y;
+        float playerMaxY = player.y + PLAYER_HEIGHT;
+        float playerMinZ = player.z - PLAYER_WIDTH * 0.5f;
+        float playerMaxZ = player.z + PLAYER_WIDTH * 0.5f;
+        return x + 1.0f > playerMinX && x < playerMaxX
+                && y + 1.0f > playerMinY && y < playerMaxY
+                && z + 1.0f > playerMinZ && z < playerMaxZ;
+    }
+
+    static boolean isFaceVisible(int x, int y, int z) {
+        BlockType neighbor = getBlock(x, y, z);
+        return neighbor == BlockType.AIR || neighbor == BlockType.WATER || neighbor == BlockType.TORCH;
+    }
+
+    static void setWorldBlock(int x, int y, int z, BlockType block) {
+        if (y < 0 || y >= WORLD_HEIGHT) return;
+        int cx = floorDiv(x, CHUNK_SIZE);
+        int cz = floorDiv(z, CHUNK_SIZE);
+        Chunk chunk = getChunk(cx, cz, true);
+        if (!chunk.generated) generateChunk(chunk);
+        setBlock(chunk, floorMod(x, CHUNK_SIZE), y, floorMod(z, CHUNK_SIZE), block);
+    }
+
+    static void saveWorld() throws IOException {
+        saveWorld(SAVE_PATH);
+    }
+
+    static void saveWorld(Path destination) throws IOException {
+        Path saveFile = destination.toAbsolutePath();
+        Path parent = saveFile.getParent();
+        Files.createDirectories(parent);
+        Path temporaryFile = Files.createTempFile(parent, "world-", ".tmp");
+        try {
+            try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(temporaryFile))) {
+                output.writeInt(SAVE_MAGIC);
+                output.writeInt(SAVE_VERSION);
+                ArrayList<Chunk> chunks = new ArrayList<>();
+                for (Chunk chunk : world.chunks.values()) {
+                    if (chunk.generated) chunks.add(chunk);
+                }
+                chunks.sort(Comparator.comparingInt((Chunk chunk) -> chunk.cx)
+                        .thenComparingInt(chunk -> chunk.cz));
+                output.writeInt(chunks.size());
+                for (Chunk chunk : chunks) {
+                    output.writeInt(chunk.cx);
+                    output.writeInt(chunk.cz);
+                    output.writeInt(chunk.blocks.length);
+                    output.write(chunk.blocks);
+                }
+                output.writeFloat(player.x);
+                output.writeFloat(player.y);
+                output.writeFloat(player.z);
+                output.writeFloat(player.yaw);
+                output.writeFloat(player.pitch);
+                output.writeInt(inventory.selected);
+                output.writeInt(inventory.counts.length);
+                for (int count : inventory.counts) output.writeInt(count);
+            }
+            try {
+                Files.move(temporaryFile, saveFile, StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temporaryFile, saveFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporaryFile);
+        }
+    }
+
+    static void loadWorld() throws IOException {
+        loadWorld(SAVE_PATH);
+    }
+
+    static void loadWorld(Path source) throws IOException {
+        try (DataInputStream input = new DataInputStream(Files.newInputStream(source))) {
+            if (input.readInt() != SAVE_MAGIC) throw new IOException("Unrecognized save file");
+            int version = input.readInt();
+            if (version != SAVE_VERSION) throw new IOException("Unsupported save version: " + version);
+            int chunkCount = input.readInt();
+            if (chunkCount < 0 || chunkCount > 16_384) throw new IOException("Invalid chunk count");
+
+            World loadedWorld = new World();
+            int expectedBlockLength = CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE;
+            for (int i = 0; i < chunkCount; i++) {
+                int cx = input.readInt();
+                int cz = input.readInt();
+                int blockLength = input.readInt();
+                if (Math.abs((long)cx) > 1_000_000 || Math.abs((long)cz) > 1_000_000
+                        || blockLength != expectedBlockLength) {
+                    throw new IOException("Invalid chunk data");
+                }
+                Chunk chunk = new Chunk(cx, cz);
+                input.readFully(chunk.blocks);
+                for (byte block : chunk.blocks) {
+                    if ((block & 0xff) >= BlockType.values().length) {
+                        throw new IOException("Invalid block type in save file");
+                    }
+                }
+                chunk.generated = true;
+                if (loadedWorld.chunks.putIfAbsent(key(cx, cz), chunk) != null) {
+                    throw new IOException("Duplicate chunk in save file");
+                }
+            }
+
+            Player loadedPlayer = new Player();
+            loadedPlayer.x = input.readFloat();
+            loadedPlayer.y = input.readFloat();
+            loadedPlayer.z = input.readFloat();
+            loadedPlayer.yaw = input.readFloat();
+            loadedPlayer.pitch = input.readFloat();
+            if (!Float.isFinite(loadedPlayer.x) || !Float.isFinite(loadedPlayer.y)
+                    || !Float.isFinite(loadedPlayer.z) || !Float.isFinite(loadedPlayer.yaw)
+                    || !Float.isFinite(loadedPlayer.pitch) || Math.abs(loadedPlayer.x) > 16_000_000.0f
+                    || Math.abs(loadedPlayer.z) > 16_000_000.0f || loadedPlayer.y < 0.0f
+                    || loadedPlayer.y > 1_000_000.0f) {
+                throw new IOException("Invalid player data in save file");
+            }
+            loadedPlayer.pitch = clamp(loadedPlayer.pitch, -1.50f, 1.50f);
+            int selected = input.readInt();
+            int countLength = input.readInt();
+            if (selected < 0 || selected >= 9 || countLength != BlockType.values().length) {
+                throw new IOException("Invalid inventory data");
+            }
+            Inventory loadedInventory = new Inventory();
+            loadedInventory.selected = selected;
+            for (int i = 0; i < countLength; i++) {
+                int count = input.readInt();
+                if (count < 0 || count > 9999) throw new IOException("Invalid inventory count");
+                loadedInventory.counts[i] = count;
+            }
+            if (input.read() != -1) throw new IOException("Unexpected data after save file");
+
+            world = loadedWorld;
+            player = loadedPlayer;
+            inventory = loadedInventory;
+        }
+    }
+
+    static void setStatus(String message) {
+        statusMessage = message;
+        statusTimer = 3.0;
+    }
+
+    static void reportPersistenceError(String message, IOException error) {
+        System.err.println(message + ": " + error.getMessage());
+        error.printStackTrace(System.err);
+        setStatus(message);
     }
 
     static void moveWithCollision(float dt) {
