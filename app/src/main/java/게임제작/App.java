@@ -26,6 +26,7 @@ public class App {
 
     static final int CHUNK_SIZE = 16;
     static final int WORLD_HEIGHT = 64;
+    static final int BIOME_REGION_SIZE = 80;
     static final int RENDER_DISTANCE = 6;
     static final int CHUNK_MESH_BUILD_BUDGET = 2;
     static final float VIEW_DISTANCE = 64.0f;
@@ -147,6 +148,7 @@ public class App {
     static double lastMouseX;
     static double lastMouseY;
     static boolean mousePositionInitialized;
+    static double hotbarScrollRemainder;
     static double worldClockSeconds = DAY_LENGTH_SECONDS * 0.25;
     static int daylightBucket = -1;
 
@@ -202,6 +204,7 @@ public class App {
         worldClockSeconds = DAY_LENGTH_SECONDS * 0.25;
         player.y = Math.max(terrainHeight((int)player.x, (int)player.z), 10);
         inventory = new Inventory();
+        glfwSetScrollCallback(window, (handle, xOffset, yOffset) -> scrollHotbar(yOffset));
         updateDaylightMeshes();
 
         ensureWorldAround(player.x, player.z);
@@ -391,6 +394,15 @@ public class App {
         return new float[]{x, z};
     }
 
+    static void scrollHotbar(double yOffset) {
+        if (inventory == null || yOffset == 0.0) return;
+        hotbarScrollRemainder += yOffset;
+        int steps = (int)hotbarScrollRemainder;
+        if (steps == 0) return;
+        inventory.selected = floorMod(inventory.selected - steps, inventory.hotbar.length);
+        hotbarScrollRemainder -= steps;
+    }
+
     static void render() {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -413,6 +425,7 @@ public class App {
         glTranslatef(-player.x, -(player.y + PLAYER_EYE), -player.z);
 
         drawWorld(aspect);
+        drawHeldItem();
         drawHud(width, height);
     }
 
@@ -504,7 +517,7 @@ public class App {
         double angle = progress * Math.PI * 2.0;
         float elevation = (float)Math.sin(angle);
         float horizontalX = (float)Math.cos(angle);
-        float horizontalZ = (float)Math.sin(angle);
+        float horizontalZ = (float)-Math.sin(angle);
         float twilight = 1.0f - smoothStep(0.02f, 0.62f, Math.abs(elevation));
         float starAlpha = twilight * 0.82f;
 
@@ -666,6 +679,73 @@ public class App {
         }
         glDepthMask(true);
         glDisable(GL_BLEND);
+    }
+
+    static void drawHeldItem() {
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+
+        drawCuboid(0.34f, -0.72f, -1.16f,
+                0.60f, -0.34f, -0.86f, 0.22f, 0.34f, 0.56f);
+        drawCuboid(0.41f, -0.50f, -1.25f,
+                0.57f, -0.34f, -1.10f, 0.82f, 0.61f, 0.43f);
+
+        BlockType held = inventory.selectedBlock();
+        if (held == BlockType.TORCH) {
+            drawCuboid(0.455f, -0.43f, -1.43f,
+                    0.505f, -0.18f, -1.32f, 0.42f, 0.26f, 0.12f);
+            drawCuboid(0.44f, -0.21f, -1.42f,
+                    0.52f, -0.14f, -1.32f, 1.0f, 0.42f, 0.08f);
+            drawCuboid(0.46f, -0.15f, -1.41f,
+                    0.50f, -0.10f, -1.33f, 1.0f, 0.86f, 0.40f);
+        } else {
+            float[] color = colorOf(held);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(color[0], color[1], color[2],
+                    held == BlockType.WATER ? 0.68f : 1.0f);
+            drawHeldCube(0.43f, -0.43f, -1.44f,
+                    0.59f, -0.27f, -1.28f);
+            glDisable(GL_BLEND);
+        }
+
+        glEnable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+    }
+
+    static void drawHeldCube(float x0, float y0, float z0,
+                             float x1, float y1, float z1) {
+        glBegin(GL_QUADS);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x0, y0, z1);
+        glEnd();
     }
 
     static boolean isChunkInView(Chunk chunk, float aspect) {
@@ -901,7 +981,7 @@ public class App {
         float z1 = z + 1;
 
         float[] color = colorOf(t);
-        float illumination = Math.min(1.0f, 0.20f + sunlight * (0.68f / 15.0f)
+        float illumination = Math.min(1.0f, 0.20f + daylightLevel() * sunlight * (0.68f / 15.0f)
                 + torchlight * (0.82f / 15.0f));
         glBegin(GL_QUADS);
         if (frontVisible) {
@@ -1573,9 +1653,38 @@ public class App {
     }
 
     static Biome baseBiomeAt(int wx, int wz) {
-        float region = noise2d(wx * 0.0045f + 217.0f, wz * 0.0045f - 91.0f);
-        if (region > 0.28f) return Biome.MOUNTAINS;
-        if (region < -0.28f) return Biome.DESERT;
+        if (wx * (long)wx + wz * (long)wz < 24L * 24L) return Biome.PLAINS;
+
+        int cellX = floorDiv(wx, BIOME_REGION_SIZE);
+        int cellZ = floorDiv(wz, BIOME_REGION_SIZE);
+        int nearestX = cellX;
+        int nearestZ = cellZ;
+        float nearestDistance = Float.MAX_VALUE;
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int candidateX = cellX + dx;
+                int candidateZ = cellZ + dz;
+                float siteX = (candidateX + 0.2f
+                        + hash2(candidateX * 31 + 11, candidateZ * 17 - 5) * 0.6f)
+                        * BIOME_REGION_SIZE;
+                float siteZ = (candidateZ + 0.2f
+                        + hash2(candidateX * 23 - 7, candidateZ * 37 + 13) * 0.6f)
+                        * BIOME_REGION_SIZE;
+                float deltaX = wx - siteX;
+                float deltaZ = wz - siteZ;
+                float distance = deltaX * deltaX + deltaZ * deltaZ;
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestX = candidateX;
+                    nearestZ = candidateZ;
+                }
+            }
+        }
+        if (nearestX == 0 && nearestZ == 0) return Biome.PLAINS;
+
+        float biomeChoice = hash2(nearestX * 73 + 19, nearestZ * 97 - 29);
+        if (biomeChoice < 0.24f) return Biome.DESERT;
+        if (biomeChoice < 0.52f) return Biome.MOUNTAINS;
         return Biome.PLAINS;
     }
 

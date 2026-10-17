@@ -20,6 +20,7 @@ class AppTest {
         App.flightMode = false;
         App.lastSpacePressTime = Double.NEGATIVE_INFINITY;
         App.spaceKeyWasDown = false;
+        App.hotbarScrollRemainder = 0.0;
         App.Chunk chunk = new App.Chunk(0, 0);
         chunk.generated = true;
         App.world.chunks.put(App.key(0, 0), chunk);
@@ -117,6 +118,17 @@ class AppTest {
     }
 
     @Test
+    void hotbarScrollCyclesItemsAndAccumulatesPartialWheelTicks() {
+        App.inventory.selected = 0;
+        App.scrollHotbar(0.5);
+        assertEquals(0, App.inventory.selected);
+        App.scrollHotbar(0.5);
+        assertEquals(8, App.inventory.selected);
+        App.scrollHotbar(-2.0);
+        assertEquals(1, App.inventory.selected);
+    }
+
+    @Test
     void doubleTappingSpaceTogglesFlight() {
         assertFalse(App.handleSpacePress(1.0));
         assertTrue(App.handleSpacePress(1.2));
@@ -166,6 +178,32 @@ class AppTest {
             }
         }
         fail("Terrain generation should provide every biome, found: " + biomes);
+    }
+
+    @Test
+    void biomeRegionsStayModerateAndSpawnStartsOnPlains() {
+        assertEquals(App.Biome.PLAINS, App.biomeAt(8, 8));
+        int longestDesertRun = 0;
+        int desertSamples = 0;
+        int totalSamples = 0;
+        for (int z = -400; z <= 400; z += 24) {
+            int currentRun = 0;
+            for (int x = -400; x <= 400; x += 4) {
+                App.Biome biome = App.baseBiomeAt(x, z);
+                totalSamples++;
+                if (biome == App.Biome.DESERT) {
+                    desertSamples++;
+                    currentRun += 4;
+                    longestDesertRun = Math.max(longestDesertRun, currentRun);
+                } else {
+                    currentRun = 0;
+                }
+            }
+        }
+        assertTrue(longestDesertRun <= 180,
+                "Desert region should not dominate the landscape: " + longestDesertRun);
+        assertTrue(desertSamples < totalSamples * 0.4,
+                "Desert should remain one of several biomes, not dominate the map");
     }
 
     @Test
