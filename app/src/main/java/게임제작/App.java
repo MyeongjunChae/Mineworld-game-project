@@ -362,9 +362,9 @@ public class App {
     static float[] movementDirection(float yaw, boolean forward, boolean backward,
                                      boolean left, boolean right) {
         float forwardX = (float)Math.sin(yaw);
-        float forwardZ = (float)Math.cos(yaw);
+        float forwardZ = (float)-Math.cos(yaw);
         float rightX = (float)Math.cos(yaw);
-        float rightZ = (float)-Math.sin(yaw);
+        float rightZ = (float)Math.sin(yaw);
         float x = (forward ? forwardX : 0.0f) - (backward ? forwardX : 0.0f)
                 - (left ? rightX : 0.0f) + (right ? rightX : 0.0f);
         float z = (forward ? forwardZ : 0.0f) - (backward ? forwardZ : 0.0f)

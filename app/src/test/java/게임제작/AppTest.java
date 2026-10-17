@@ -103,9 +103,12 @@ class AppTest {
                 true, false, false, false);
         float[] diagonal = App.movementDirection(0.0f, true, false, false, true);
 
-        assertArrayEquals(new float[]{0.0f, 1.0f}, forwardAtZeroYaw, 0.0001f);
+        assertArrayEquals(new float[]{0.0f, -1.0f}, forwardAtZeroYaw, 0.0001f);
         assertArrayEquals(new float[]{1.0f, 0.0f}, rightAtZeroYaw, 0.0001f);
         assertArrayEquals(new float[]{1.0f, 0.0f}, forwardAtQuarterTurn, 0.0001f);
+        float[] rightAtQuarterTurn = App.movementDirection((float)Math.PI / 2.0f,
+                false, false, false, true);
+        assertArrayEquals(new float[]{0.0f, 1.0f}, rightAtQuarterTurn, 0.0001f);
         assertEquals(1.0f, (float)Math.sqrt(diagonal[0] * diagonal[0]
                 + diagonal[1] * diagonal[1]), 0.0001f);
     }
