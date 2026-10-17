@@ -396,7 +396,6 @@ public class App {
         glRotatef((float)Math.toDegrees(player.yaw), 0, 1, 0);
         glTranslatef(-player.x, -(player.y + PLAYER_EYE), -player.z);
 
-        drawGrid(64, 1.0f);
         drawWorld(aspect);
         drawHud(width, height);
     }
@@ -831,19 +830,6 @@ public class App {
     static void setBlockFaceColor(float[] color, float brightness) {
         glColor4f(color[0] * brightness, color[1] * brightness,
                 color[2] * brightness, color[3]);
-    }
-
-    static void drawGrid(int count, float spacing) {
-        glColor3f(0.3f, 0.3f, 0.3f);
-        glBegin(GL_LINES);
-        for (int i = -count; i <= count; i++) {
-            glVertex3f(i * spacing, 0.0f, -count * spacing);
-            glVertex3f(i * spacing, 0.0f,  count * spacing);
-
-            glVertex3f(-count * spacing, 0.0f, i * spacing);
-            glVertex3f( count * spacing, 0.0f, i * spacing);
-        }
-        glEnd();
     }
 
     static void drawHud(int width, int height) {
