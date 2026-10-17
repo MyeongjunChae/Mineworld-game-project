@@ -14,6 +14,9 @@ class AppTest {
         App.world = new App.World();
         App.player = new App.Player();
         App.inventory = new App.Inventory();
+        App.flightMode = false;
+        App.lastSpacePressTime = Double.NEGATIVE_INFINITY;
+        App.spaceKeyWasDown = false;
         App.Chunk chunk = new App.Chunk(0, 0);
         chunk.generated = true;
         App.world.chunks.put(App.key(0, 0), chunk);
@@ -90,6 +93,61 @@ class AppTest {
         App.setWorldBlock(3, 2, 0, App.BlockType.DIRT);
 
         assertTrue(chunk.meshDirty);
+    }
+
+    @Test
+    void movementDirectionsStayAlignedWithCameraAndNormalizeDiagonals() {
+        float[] forwardAtZeroYaw = App.movementDirection(0.0f, true, false, false, false);
+        float[] rightAtZeroYaw = App.movementDirection(0.0f, false, false, false, true);
+        float[] forwardAtQuarterTurn = App.movementDirection((float)Math.PI / 2.0f,
+                true, false, false, false);
+        float[] diagonal = App.movementDirection(0.0f, true, false, false, true);
+
+        assertArrayEquals(new float[]{0.0f, 1.0f}, forwardAtZeroYaw, 0.0001f);
+        assertArrayEquals(new float[]{1.0f, 0.0f}, rightAtZeroYaw, 0.0001f);
+        assertArrayEquals(new float[]{1.0f, 0.0f}, forwardAtQuarterTurn, 0.0001f);
+        assertEquals(1.0f, (float)Math.sqrt(diagonal[0] * diagonal[0]
+                + diagonal[1] * diagonal[1]), 0.0001f);
+    }
+
+    @Test
+    void doubleTappingSpaceTogglesFlight() {
+        assertFalse(App.handleSpacePress(1.0));
+        assertTrue(App.handleSpacePress(1.2));
+        assertTrue(App.flightMode);
+        assertFalse(App.handleSpacePress(2.0));
+        assertTrue(App.handleSpacePress(2.2));
+        assertFalse(App.flightMode);
+    }
+
+    @Test
+    void flightControlsVerticalMovement() {
+        assertEquals(App.FLIGHT_SPEED, App.flightVerticalVelocity(true, false));
+        assertEquals(-App.FLIGHT_SPEED, App.flightVerticalVelocity(false, true));
+        assertEquals(0.0f, App.flightVerticalVelocity(false, false));
+        assertEquals(0.0f, App.flightVerticalVelocity(true, true));
+    }
+
+    @Test
+    void waterFacesAreHiddenAgainstNeighboringWater() {
+        App.Chunk chunk = App.world.chunks.get(App.key(0, 0));
+        App.setBlock(chunk, 4, 3, 3, App.BlockType.WATER);
+        App.setBlock(chunk, 5, 3, 3, App.BlockType.WATER);
+
+        assertFalse(App.isWaterFaceVisible(5, 3, 3));
+        assertTrue(App.isWaterFaceVisible(4, 4, 3));
+    }
+
+    @Test
+    void sunlightAndTorchesGiveBlocksDifferentLightLevels() {
+        App.Chunk chunk = App.world.chunks.get(App.key(0, 0));
+        App.rebuildChunkLighting(chunk);
+        assertEquals(15, chunk.sunlight[chunk.idx(3, 2, 0)] & 0xff);
+        assertEquals(0, chunk.sunlight[chunk.idx(3, 1, 0)] & 0xff);
+
+        App.setBlock(chunk, 4, 2, 0, App.BlockType.TORCH);
+        App.rebuildChunkLighting(chunk);
+        assertEquals(13, chunk.torchlight[chunk.idx(5, 2, 0)] & 0xff);
     }
 
     @Test

@@ -35,6 +35,8 @@ public class App {
     static final float PLAYER_EYE = 1.62f;
     static final float GRAVITY = 24.0f;
     static final float JUMP_VEL = 8.5f;
+    static final float FLIGHT_SPEED = 8.0f;
+    static final double DOUBLE_TAP_SECONDS = 0.35;
     static final float MOVE_SPEED = 6.0f;
     static final float RUN_SPEED = 9.5f;
     static final float REACH_DISTANCE = 6.0f;
@@ -51,9 +53,11 @@ public class App {
         final int cx, cz;
         boolean generated;
         int displayList;
+        int transparentDisplayList;
         boolean meshDirty = true;
         final byte[] blocks = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
-        final byte[] light = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
+        final byte[] sunlight = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
+        final byte[] torchlight = new byte[CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE];
 
         Chunk(int cx, int cz) {
             this.cx = cx;
@@ -129,6 +133,14 @@ public class App {
     static boolean loadKeyWasDown;
     static boolean escapeKeyWasDown;
     static boolean captureKeyWasDown;
+    static boolean spaceKeyWasDown;
+    static boolean flightMode;
+    static double lastSpacePressTime = Double.NEGATIVE_INFINITY;
+    static double mouseDeltaX;
+    static double mouseDeltaY;
+    static double lastMouseX;
+    static double lastMouseY;
+    static boolean mousePositionInitialized;
 
     public static void main(String[] args) {
         GLFWErrorCallback.createPrint(System.err).set();
@@ -152,11 +164,30 @@ public class App {
         GL.createCapabilities();
 
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetCursorPosCallback(window, (handle, x, y) -> {
+            if (glfwGetInputMode(handle, GLFW_CURSOR) != GLFW_CURSOR_DISABLED) {
+                mousePositionInitialized = false;
+                return;
+            }
+            if (mousePositionInitialized) {
+                mouseDeltaX += x - lastMouseX;
+                mouseDeltaY += y - lastMouseY;
+            }
+            lastMouseX = x;
+            lastMouseY = y;
+            mousePositionInitialized = true;
+        });
+        double[] initialMouseX = new double[1];
+        double[] initialMouseY = new double[1];
+        glfwGetCursorPos(window, initialMouseX, initialMouseY);
+        lastMouseX = initialMouseX[0];
+        lastMouseY = initialMouseY[0];
+        mousePositionInitialized = true;
 
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glClearColor(0.2f, 0.5f, 1.0f, 1.0f);
+        glClearColor(0.53f, 0.72f, 0.83f, 1.0f);
 
         world = new World();
         player = new Player();
@@ -206,13 +237,18 @@ public class App {
         boolean captureDown = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
         if (escapeDown && !escapeKeyWasDown) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            mousePositionInitialized = false;
+            mouseDeltaX = 0.0;
+            mouseDeltaY = 0.0;
         }
         if (captureDown && !captureKeyWasDown) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            int[] width = new int[1];
-            int[] height = new int[1];
-            glfwGetWindowSize(window, width, height);
-            glfwSetCursorPos(window, width[0] * 0.5, height[0] * 0.5);
+            double[] cursorX = new double[1];
+            double[] cursorY = new double[1];
+            glfwGetCursorPos(window, cursorX, cursorY);
+            lastMouseX = cursorX[0];
+            lastMouseY = cursorY[0];
+            mousePositionInitialized = true;
         }
         escapeKeyWasDown = escapeDown;
         captureKeyWasDown = captureDown;
@@ -224,25 +260,12 @@ public class App {
             }
         }
 
-        float mouseDX = 0.0f;
-        float mouseDY = 0.0f;
-
         if (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
-            double[] mx = new double[1];
-            double[] my = new double[1];
-            int[] width = new int[1];
-            int[] height = new int[1];
-            glfwGetCursorPos(window, mx, my);
-            glfwGetWindowSize(window, width, height);
-            double centerX = width[0] * 0.5;
-            double centerY = height[0] * 0.5;
-            mouseDX = (float)(mx[0] - centerX);
-            mouseDY = (float)(my[0] - centerY);
-            glfwSetCursorPos(window, centerX, centerY);
-
-            player.yaw += mouseDX * 0.0032f;
-            player.pitch -= mouseDY * 0.0032f;
+            player.yaw += (float)mouseDeltaX * 0.0032f;
+            player.pitch -= (float)mouseDeltaY * 0.0032f;
             player.pitch = clamp(player.pitch, -1.50f, 1.50f);
+            mouseDeltaX = 0.0;
+            mouseDeltaY = 0.0;
         }
 
         float yaw = player.yaw;
@@ -252,45 +275,30 @@ public class App {
         float fy = (float)(Math.sin(pitch));
         float fz = (float)(Math.cos(pitch) * Math.cos(yaw));
 
-        float rx = (float)Math.sin(yaw - Math.PI / 2.0);
-        float rz = (float)Math.cos(yaw - Math.PI / 2.0);
-
         float speed = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ? RUN_SPEED : MOVE_SPEED;
+        boolean forward = isKeyDown(GLFW_KEY_W) || isKeyDown(GLFW_KEY_UP);
+        boolean backward = isKeyDown(GLFW_KEY_S) || isKeyDown(GLFW_KEY_DOWN);
+        boolean left = isKeyDown(GLFW_KEY_A) || isKeyDown(GLFW_KEY_LEFT);
+        boolean right = isKeyDown(GLFW_KEY_D) || isKeyDown(GLFW_KEY_RIGHT);
+        float[] movement = movementDirection(yaw, forward, backward, left, right);
+        player.vx = movement[0] * speed;
+        player.vz = movement[1] * speed;
 
-        float wishX = 0.0f;
-        float wishZ = 0.0f;
+        boolean spaceDown = isKeyDown(GLFW_KEY_SPACE);
+        if (spaceDown && !spaceKeyWasDown) {
+            handleSpacePress(glfwGetTime());
+        }
+        spaceKeyWasDown = spaceDown;
 
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
-            wishX += fx;
-            wishZ += fz;
-        }
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-            wishX -= fx;
-            wishZ -= fz;
-        }
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
-            wishX += rx;
-            wishZ += rz;
-        }
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-            wishX -= rx;
-            wishZ -= rz;
-        }
-
-        float len = (float)Math.sqrt(wishX * wishX + wishZ * wishZ);
-        if (len > 0.0f) {
-            wishX /= len;
-            wishZ /= len;
-        }
-
-        player.vx = wishX * speed;
-        player.vz = wishZ * speed;
-
-        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && player.onGround) {
+        if (flightMode) {
+            player.vy = flightVerticalVelocity(spaceDown, isKeyDown(GLFW_KEY_LEFT_SHIFT));
+        } else if (spaceDown && player.onGround) {
             player.vy = JUMP_VEL;
         }
 
-        player.vy -= GRAVITY * dt;
+        if (!flightMode) {
+            player.vy -= GRAVITY * dt;
+        }
 
         ensureWorldAround(player.x, player.z);
 
@@ -328,6 +336,45 @@ public class App {
         }
         saveKeyWasDown = saveDown;
         loadKeyWasDown = loadDown;
+    }
+
+    static boolean isKeyDown(int key) {
+        return glfwGetKey(window, key) == GLFW_PRESS;
+    }
+
+    static boolean handleSpacePress(double now) {
+        if (now - lastSpacePressTime <= DOUBLE_TAP_SECONDS) {
+            flightMode = !flightMode;
+            lastSpacePressTime = Double.NEGATIVE_INFINITY;
+            player.vy = 0.0f;
+            setStatus(flightMode ? "Flight enabled" : "Flight disabled");
+            return true;
+        }
+        lastSpacePressTime = now;
+        return false;
+    }
+
+    static float flightVerticalVelocity(boolean ascend, boolean descend) {
+        if (ascend == descend) return 0.0f;
+        return ascend ? FLIGHT_SPEED : -FLIGHT_SPEED;
+    }
+
+    static float[] movementDirection(float yaw, boolean forward, boolean backward,
+                                     boolean left, boolean right) {
+        float forwardX = (float)Math.sin(yaw);
+        float forwardZ = (float)Math.cos(yaw);
+        float rightX = (float)Math.cos(yaw);
+        float rightZ = (float)-Math.sin(yaw);
+        float x = (forward ? forwardX : 0.0f) - (backward ? forwardX : 0.0f)
+                - (left ? rightX : 0.0f) + (right ? rightX : 0.0f);
+        float z = (forward ? forwardZ : 0.0f) - (backward ? forwardZ : 0.0f)
+                - (left ? rightZ : 0.0f) + (right ? rightZ : 0.0f);
+        float length = (float)Math.sqrt(x * x + z * z);
+        if (length > 0.0f) {
+            x /= length;
+            z /= length;
+        }
+        return new float[]{x, z};
     }
 
     static void render() {
@@ -378,8 +425,21 @@ public class App {
             if ((chunk.displayList == 0 || chunk.meshDirty)
                     && meshBuilds >= CHUNK_MESH_BUILD_BUDGET) continue;
             if (chunk.displayList == 0 || chunk.meshDirty) meshBuilds++;
-            drawChunk(chunk);
+            compileChunkMesh(chunk);
+            glCallList(chunk.displayList);
         }
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(false);
+        for (int i = visibleChunks.size() - 1; i >= 0; i--) {
+            Chunk chunk = visibleChunks.get(i);
+            if (chunk.displayList != 0 && !chunk.meshDirty) {
+                glCallList(chunk.transparentDisplayList);
+            }
+        }
+        glDepthMask(true);
+        glDisable(GL_BLEND);
     }
 
     static boolean isChunkInView(Chunk chunk, float aspect) {
@@ -441,23 +501,40 @@ public class App {
         return distance + radius < 0.0f;
     }
 
-    static void drawChunk(Chunk chunk) {
-        if (chunk.displayList == 0) {
-            chunk.displayList = glGenLists(1);
+    static void compileChunkMesh(Chunk chunk) {
+        if (chunk.displayList == 0 || chunk.transparentDisplayList == 0) {
+            chunk.displayList = glGenLists(2);
             if (chunk.displayList == 0) {
                 throw new IllegalStateException("Could not allocate chunk display list");
             }
+            chunk.transparentDisplayList = chunk.displayList + 1;
             chunk.meshDirty = true;
         }
         if (chunk.meshDirty) {
+            rebuildChunkLighting(chunk);
             glNewList(chunk.displayList, GL_COMPILE);
             for (int x = 0; x < CHUNK_SIZE; x++) {
                 for (int y = 0; y < WORLD_HEIGHT; y++) {
                     for (int z = 0; z < CHUNK_SIZE; z++) {
                         BlockType block = getBlock(chunk, x, y, z);
-                        if (block != BlockType.AIR) {
+                        if (block != BlockType.AIR && block != BlockType.WATER) {
+                            int index = chunk.idx(x, y, z);
                             drawBlock(chunk.cx * CHUNK_SIZE + x, y,
-                                    chunk.cz * CHUNK_SIZE + z, block);
+                                    chunk.cz * CHUNK_SIZE + z, block,
+                                    chunk.sunlight[index] & 0xff, chunk.torchlight[index] & 0xff);
+                        }
+                    }
+                }
+            }
+            glEndList();
+
+            glNewList(chunk.transparentDisplayList, GL_COMPILE);
+            for (int x = 0; x < CHUNK_SIZE; x++) {
+                for (int y = 0; y < WORLD_HEIGHT; y++) {
+                    for (int z = 0; z < CHUNK_SIZE; z++) {
+                        if (getBlock(chunk, x, y, z) == BlockType.WATER) {
+                            drawWaterBlock(chunk.cx * CHUNK_SIZE + x, y,
+                                    chunk.cz * CHUNK_SIZE + z);
                         }
                     }
                 }
@@ -465,15 +542,15 @@ public class App {
             glEndList();
             chunk.meshDirty = false;
         }
-        glCallList(chunk.displayList);
     }
 
     static void invalidateChunkMesh(Chunk chunk) {
         if (chunk == null) return;
         chunk.meshDirty = true;
         if (chunk.displayList != 0) {
-            glDeleteLists(chunk.displayList, 1);
+            glDeleteLists(chunk.displayList, 2);
             chunk.displayList = 0;
+            chunk.transparentDisplayList = 0;
         }
     }
 
@@ -493,17 +570,94 @@ public class App {
         invalidateChunkMesh(getChunk(chunk.cx, chunk.cz + 1, false));
     }
 
+    static void invalidateTorchLightingAround(Chunk center) {
+        for (int cz = center.cz - 1; cz <= center.cz + 1; cz++) {
+            for (int cx = center.cx - 1; cx <= center.cx + 1; cx++) {
+                invalidateChunkMesh(getChunk(cx, cz, false));
+            }
+        }
+    }
+
+    static void rebuildChunkLighting(Chunk chunk) {
+        java.util.Arrays.fill(chunk.sunlight, (byte)0);
+        java.util.Arrays.fill(chunk.torchlight, (byte)0);
+
+        for (int x = 0; x < CHUNK_SIZE; x++) {
+            for (int z = 0; z < CHUNK_SIZE; z++) {
+                int skyLevel = 15;
+                for (int y = WORLD_HEIGHT - 1; y >= 0; y--) {
+                    BlockType block = getBlock(chunk, x, y, z);
+                    int index = chunk.idx(x, y, z);
+                    chunk.sunlight[index] = (byte)skyLevel;
+                    if (block == BlockType.LEAF) {
+                        skyLevel = Math.max(0, skyLevel - 3);
+                    } else if (block != BlockType.AIR && block != BlockType.WATER
+                            && block != BlockType.TORCH) {
+                        skyLevel = 0;
+                    }
+                }
+            }
+        }
+
+        for (int cz = chunk.cz - 1; cz <= chunk.cz + 1; cz++) {
+            for (int cx = chunk.cx - 1; cx <= chunk.cx + 1; cx++) {
+                Chunk sourceChunk = getChunk(cx, cz, false);
+                if (sourceChunk == null || !sourceChunk.generated) continue;
+                for (int x = 0; x < CHUNK_SIZE; x++) {
+                    for (int y = 0; y < WORLD_HEIGHT; y++) {
+                        for (int z = 0; z < CHUNK_SIZE; z++) {
+                            if (getBlock(sourceChunk, x, y, z) != BlockType.TORCH) continue;
+                            spreadTorchLight(chunk,
+                                    sourceChunk.cx * CHUNK_SIZE + x, y,
+                                    sourceChunk.cz * CHUNK_SIZE + z);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static void spreadTorchLight(Chunk target, int sourceX, int sourceY, int sourceZ) {
+        int radius = 8;
+        for (int dx = -radius; dx <= radius; dx++) {
+            int worldX = sourceX + dx;
+            int localX = worldX - target.cx * CHUNK_SIZE;
+            if (localX < 0 || localX >= CHUNK_SIZE) continue;
+            for (int dy = -radius; dy <= radius; dy++) {
+                int y = sourceY + dy;
+                if (y < 0 || y >= WORLD_HEIGHT) continue;
+                for (int dz = -radius; dz <= radius; dz++) {
+                    int distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+                    if (distance > radius) continue;
+                    int localZ = sourceZ + dz - target.cz * CHUNK_SIZE;
+                    if (localZ < 0 || localZ >= CHUNK_SIZE) continue;
+                    int lightLevel = 14 - distance;
+                    int index = target.idx(localX, y, localZ);
+                    if ((target.torchlight[index] & 0xff) < lightLevel) {
+                        target.torchlight[index] = (byte)lightLevel;
+                    }
+                }
+            }
+        }
+    }
+
     static void disposeChunkMeshes(World targetWorld) {
         for (Chunk chunk : targetWorld.chunks.values()) {
             if (chunk.displayList != 0) {
-                glDeleteLists(chunk.displayList, 1);
+                glDeleteLists(chunk.displayList, 2);
                 chunk.displayList = 0;
+                chunk.transparentDisplayList = 0;
                 chunk.meshDirty = true;
             }
         }
     }
 
-    static void drawBlock(int x, int y, int z, BlockType t) {
+    static void drawBlock(int x, int y, int z, BlockType t, int sunlight, int torchlight) {
+        if (t == BlockType.TORCH) {
+            drawTorch(x, y, z);
+            return;
+        }
+
         boolean frontVisible = isFaceVisible(x, y, z + 1);
         boolean backVisible = isFaceVisible(x, y, z - 1);
         boolean leftVisible = isFaceVisible(x - 1, y, z);
@@ -521,50 +675,157 @@ public class App {
         float z1 = z + 1;
 
         float[] color = colorOf(t);
+        float illumination = Math.min(1.0f, 0.20f + sunlight * (0.68f / 15.0f)
+                + torchlight * (0.82f / 15.0f));
         glBegin(GL_QUADS);
         if (frontVisible) {
-            setBlockFaceColor(color, 0.82f);
+            setBlockFaceColor(color, illumination * 0.82f);
             glVertex3f(x0, y0, z1);
             glVertex3f(x1, y0, z1);
             glVertex3f(x1, y1, z1);
             glVertex3f(x0, y1, z1);
         }
         if (backVisible) {
-            setBlockFaceColor(color, 0.68f);
+            setBlockFaceColor(color, illumination * 0.68f);
             glVertex3f(x1, y0, z0);
             glVertex3f(x0, y0, z0);
             glVertex3f(x0, y1, z0);
             glVertex3f(x1, y1, z0);
         }
         if (leftVisible) {
-            setBlockFaceColor(color, 0.76f);
+            setBlockFaceColor(color, illumination * 0.76f);
             glVertex3f(x0, y0, z0);
             glVertex3f(x0, y0, z1);
             glVertex3f(x0, y1, z1);
             glVertex3f(x0, y1, z0);
         }
         if (rightVisible) {
-            setBlockFaceColor(color, 0.88f);
+            setBlockFaceColor(color, illumination * 0.88f);
             glVertex3f(x1, y0, z1);
             glVertex3f(x1, y0, z0);
             glVertex3f(x1, y1, z0);
             glVertex3f(x1, y1, z1);
         }
         if (topVisible) {
-            setBlockFaceColor(color, 1.0f);
+            setBlockFaceColor(color, illumination);
             glVertex3f(x0, y1, z1);
             glVertex3f(x1, y1, z1);
             glVertex3f(x1, y1, z0);
             glVertex3f(x0, y1, z0);
         }
         if (bottomVisible) {
-            setBlockFaceColor(color, 0.55f);
+            setBlockFaceColor(color, illumination * 0.55f);
             glVertex3f(x0, y0, z0);
             glVertex3f(x1, y0, z0);
             glVertex3f(x1, y0, z1);
             glVertex3f(x0, y0, z1);
         }
         glEnd();
+    }
+
+    static void drawTorch(int x, int y, int z) {
+        drawCuboid(x + 0.45f, y + 0.18f, z + 0.45f,
+                x + 0.55f, y + 0.72f, z + 0.55f, 0.34f, 0.22f, 0.10f);
+        drawCuboid(x + 0.39f, y + 0.67f, z + 0.39f,
+                x + 0.61f, y + 0.83f, z + 0.61f, 1.0f, 0.38f, 0.06f);
+        drawCuboid(x + 0.43f, y + 0.81f, z + 0.43f,
+                x + 0.57f, y + 0.94f, z + 0.57f, 1.0f, 0.82f, 0.28f);
+    }
+
+    static void drawCuboid(float x0, float y0, float z0,
+                           float x1, float y1, float z1,
+                           float red, float green, float blue) {
+        glBegin(GL_QUADS);
+        glColor3f(red * 0.82f, green * 0.82f, blue * 0.82f);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x0, y1, z1);
+        glColor3f(red * 0.68f, green * 0.68f, blue * 0.68f);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x1, y1, z0);
+        glColor3f(red * 0.76f, green * 0.76f, blue * 0.76f);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x0, y1, z0);
+        glColor3f(red * 0.88f, green * 0.88f, blue * 0.88f);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x1, y1, z1);
+        glColor3f(red, green, blue);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x0, y1, z0);
+        glColor3f(red * 0.55f, green * 0.55f, blue * 0.55f);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x0, y0, z1);
+        glEnd();
+    }
+
+    static void drawWaterBlock(int x, int y, int z) {
+        float x0 = x;
+        float x1 = x + 1.0f;
+        float y0 = y;
+        float y1 = y + 0.88f;
+        float z0 = z;
+        float z1 = z + 1.0f;
+        glBegin(GL_QUADS);
+        if (isWaterFaceVisible(x, y, z + 1)) {
+            glColor4f(0.18f, 0.48f, 0.78f, 0.50f);
+            glVertex3f(x0, y0, z1);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x1, y1, z1);
+            glVertex3f(x0, y1, z1);
+        }
+        if (isWaterFaceVisible(x, y, z - 1)) {
+            glColor4f(0.14f, 0.40f, 0.70f, 0.50f);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x0, y1, z0);
+            glVertex3f(x1, y1, z0);
+        }
+        if (isWaterFaceVisible(x - 1, y, z)) {
+            glColor4f(0.16f, 0.44f, 0.74f, 0.50f);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x0, y0, z1);
+            glVertex3f(x0, y1, z1);
+            glVertex3f(x0, y1, z0);
+        }
+        if (isWaterFaceVisible(x + 1, y, z)) {
+            glColor4f(0.20f, 0.50f, 0.80f, 0.50f);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x1, y1, z0);
+            glVertex3f(x1, y1, z1);
+        }
+        if (isWaterFaceVisible(x, y + 1, z)) {
+            glColor4f(0.34f, 0.66f, 0.90f, 0.68f);
+            glVertex3f(x0, y1, z1);
+            glVertex3f(x1, y1, z1);
+            glVertex3f(x1, y1, z0);
+            glVertex3f(x0, y1, z0);
+        }
+        if (isWaterFaceVisible(x, y - 1, z)) {
+            glColor4f(0.10f, 0.32f, 0.62f, 0.50f);
+            glVertex3f(x0, y0, z0);
+            glVertex3f(x1, y0, z0);
+            glVertex3f(x1, y0, z1);
+            glVertex3f(x0, y0, z1);
+        }
+        glEnd();
+    }
+
+    static boolean isWaterFaceVisible(int x, int y, int z) {
+        BlockType neighbor = getBlock(x, y, z);
+        return neighbor == BlockType.AIR || neighbor == BlockType.LEAF
+                || neighbor == BlockType.TORCH;
     }
 
     static void setBlockFaceColor(float[] color, float brightness) {
@@ -627,9 +888,17 @@ public class App {
                     i == inventory.selected ? 0.25f : 0.55f, 0.95f);
             drawHudOutline(x, top, slotSize, slotSize, i == inventory.selected ? 3 : 1);
 
-            float[] color = colorOf(inventory.hotbar[i]);
-            glColor4f(color[0], color[1], color[2], color[3]);
-            drawHudRect(x + 13, top + 11, 18, 18);
+            BlockType block = inventory.hotbar[i];
+            if (block == BlockType.WATER) {
+                glColor4f(0.25f, 0.60f, 0.90f, 0.72f);
+                drawHudRect(x + 9, top + 22, 26, 9);
+                glColor4f(0.60f, 0.82f, 1.0f, 0.85f);
+                drawHudRect(x + 12, top + 19, 19, 2);
+            } else {
+                float[] color = colorOf(block);
+                glColor4f(color[0], color[1], color[2], color[3]);
+                drawHudRect(x + 13, top + 11, 18, 18);
+            }
             int count = inventory.counts[inventory.hotbar[i].ordinal()];
             if (count > 0) {
                 glColor4f(0.95f, 0.95f, 0.95f, 0.95f);
@@ -801,8 +1070,12 @@ public class App {
         if (!chunk.generated) generateChunk(chunk);
         int localX = floorMod(x, CHUNK_SIZE);
         int localZ = floorMod(z, CHUNK_SIZE);
+        BlockType previous = getBlock(chunk, localX, y, localZ);
         setBlock(chunk, localX, y, localZ, block);
         invalidateChunkAndNeighbors(chunk, localX, localZ);
+        if (previous == BlockType.TORCH || block == BlockType.TORCH) {
+            invalidateTorchLightingAround(chunk);
+        }
     }
 
     static void saveWorld() throws IOException {
