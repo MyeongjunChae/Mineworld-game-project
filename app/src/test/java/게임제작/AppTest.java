@@ -9,8 +9,11 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AppTest {
+    private double originalWorldClock;
+
     @BeforeEach
     void createEmptyWorld() {
+        originalWorldClock = App.worldClockSeconds;
         App.world = new App.World();
         App.player = new App.Player();
         App.inventory = new App.Inventory();
@@ -151,6 +154,55 @@ class AppTest {
         App.setBlock(chunk, 4, 2, 0, App.BlockType.TORCH);
         App.rebuildChunkLighting(chunk);
         assertEquals(13, chunk.torchlight[chunk.idx(5, 2, 0)] & 0xff);
+    }
+
+    @Test
+    void terrainContainsPlainsMountainsDesertAndCoast() {
+        java.util.EnumSet<App.Biome> biomes = java.util.EnumSet.noneOf(App.Biome.class);
+        for (int x = -3000; x <= 3000; x += 19) {
+            for (int z = -3000; z <= 3000; z += 23) {
+                biomes.add(App.biomeAt(x, z));
+                if (biomes.size() == App.Biome.values().length) return;
+            }
+        }
+        fail("Terrain generation should provide every biome, found: " + biomes);
+    }
+
+    @Test
+    void dayCycleHasDawnDaySunsetAndNoDarkNight() {
+        try {
+            App.worldClockSeconds = App.DAY_LENGTH_SECONDS * 0.25;
+            assertEquals("Day", App.skyPhaseName());
+            assertEquals(1.0f, App.daylightLevel(), 0.001f);
+
+            App.worldClockSeconds = App.DAY_LENGTH_SECONDS * 0.5;
+            assertEquals("Sunset", App.skyPhaseName());
+
+            App.worldClockSeconds = App.DAY_LENGTH_SECONDS * 0.75;
+            assertEquals("Dawn", App.skyPhaseName());
+            assertTrue(App.daylightLevel() >= 0.42f);
+        } finally {
+            App.worldClockSeconds = originalWorldClock;
+        }
+    }
+
+    @Test
+    void moonPhaseCyclesAcrossEightDays() {
+        try {
+            App.worldClockSeconds = App.DAY_LENGTH_SECONDS * 3.0;
+            assertEquals(3, App.moonPhase());
+            App.worldClockSeconds += App.DAY_LENGTH_SECONDS * 6.0;
+            assertEquals(1, App.moonPhase());
+        } finally {
+            App.worldClockSeconds = originalWorldClock;
+        }
+    }
+
+    @Test
+    void moonPhaseChangesFromFullToNew() {
+        assertEquals(1.0f, App.moonIllumination(0), 0.001f);
+        assertEquals(0.0f, App.moonIllumination(4), 0.001f);
+        assertEquals(0.5f, App.moonIllumination(2), 0.001f);
     }
 
     @Test

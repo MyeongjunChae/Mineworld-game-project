@@ -29,6 +29,8 @@ public class App {
     static final int RENDER_DISTANCE = 6;
     static final int CHUNK_MESH_BUILD_BUDGET = 2;
     static final float VIEW_DISTANCE = 64.0f;
+    static final double DAY_LENGTH_SECONDS = 300.0;
+    static final int LUNAR_CYCLE_DAYS = 8;
 
     static final float PLAYER_WIDTH = 0.60f;
     static final float PLAYER_HEIGHT = 1.80f;
@@ -47,6 +49,10 @@ public class App {
 
     enum BlockType {
         AIR, GRASS, DIRT, STONE, WOOD, LEAF, WATER, TORCH, COBBLE, SAND
+    }
+
+    enum Biome {
+        PLAINS, MOUNTAINS, BEACH, DESERT
     }
 
     static final class Chunk {
@@ -141,6 +147,8 @@ public class App {
     static double lastMouseX;
     static double lastMouseY;
     static boolean mousePositionInitialized;
+    static double worldClockSeconds = DAY_LENGTH_SECONDS * 0.25;
+    static int daylightBucket = -1;
 
     public static void main(String[] args) {
         GLFWErrorCallback.createPrint(System.err).set();
@@ -191,8 +199,10 @@ public class App {
 
         world = new World();
         player = new Player();
+        worldClockSeconds = DAY_LENGTH_SECONDS * 0.25;
         player.y = Math.max(terrainHeight((int)player.x, (int)player.z), 10);
         inventory = new Inventory();
+        updateDaylightMeshes();
 
         ensureWorldAround(player.x, player.z);
 
@@ -219,8 +229,10 @@ public class App {
                 fpsTimer = 0.0;
                 fpsCounter = 0;
                 glfwSetWindowTitle(window, statusTimer > 0.0
-                        ? "Mineworld | " + displayedFps + " FPS | " + statusMessage
-                        : "Mineworld | " + displayedFps + " FPS");
+                        ? "Mineworld | " + skyPhaseName() + " | " + displayedFps
+                        + " FPS | " + statusMessage
+                        : "Mineworld | " + skyPhaseName() + " | Moon "
+                        + (moonPhase() + 1) + "/8 | " + displayedFps + " FPS");
             }
 
             update(dt);
@@ -233,6 +245,8 @@ public class App {
 
     static void update(float dt) {
         statusTimer = Math.max(0.0, statusTimer - dt);
+        worldClockSeconds += dt;
+        updateDaylightMeshes();
         boolean escapeDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
         boolean captureDown = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
         if (escapeDown && !escapeKeyWasDown) {
@@ -388,16 +402,229 @@ public class App {
         glViewport(0, 0, width, height);
         float aspect = (float) width / (float) height;
         setPerspective(70.0f, aspect, 0.1f, 1000.0f);
+        drawSkyBackground(width, height);
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
 
         glRotatef((float)Math.toDegrees(player.pitch), 1, 0, 0);
         glRotatef((float)Math.toDegrees(player.yaw), 0, 1, 0);
+        drawCelestialBodies();
         glTranslatef(-player.x, -(player.y + PLAYER_EYE), -player.z);
 
         drawWorld(aspect);
         drawHud(width, height);
+    }
+
+    static double dayProgress() {
+        return (worldClockSeconds % DAY_LENGTH_SECONDS) / DAY_LENGTH_SECONDS;
+    }
+
+    static float sunElevation() {
+        return (float)Math.sin(dayProgress() * Math.PI * 2.0);
+    }
+
+    static float daylightLevel() {
+        return 0.42f + 0.58f * Math.max(0.0f, sunElevation());
+    }
+
+    static int moonPhase() {
+        long day = (long)(worldClockSeconds / DAY_LENGTH_SECONDS);
+        return (int)(day % LUNAR_CYCLE_DAYS);
+    }
+
+    static float moonIllumination(int phase) {
+        return (1.0f + (float)Math.cos(phase * Math.PI / 4.0)) * 0.5f;
+    }
+
+    static String skyPhaseName() {
+        double progress = dayProgress();
+        if (progress > 0.08 && progress < 0.42) return "Day";
+        if (progress >= 0.42 && progress < 0.58) return "Sunset";
+        return "Dawn";
+    }
+
+    static void updateDaylightMeshes() {
+        int newBucket = Math.round(daylightLevel() * 8.0f);
+        if (newBucket == daylightBucket) return;
+        daylightBucket = newBucket;
+        if (world != null) {
+            for (Chunk chunk : world.chunks.values()) {
+                if (chunk.generated) invalidateChunkMesh(chunk);
+            }
+        }
+    }
+
+    static void drawSkyBackground(int width, int height) {
+        float elevation = sunElevation();
+        float twilight = 1.0f - smoothStep(0.02f, 0.62f, Math.abs(elevation));
+        float[] dayZenith = {0.25f, 0.52f, 0.76f};
+        float[] dayHorizon = {0.66f, 0.82f, 0.91f};
+        float[] warmZenith = {0.30f, 0.35f, 0.50f};
+        float[] warmHorizon = {1.00f, 0.48f, 0.25f};
+
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(false);
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, width, height, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+        glBegin(GL_QUADS);
+        setSkyColor(dayZenith, warmZenith, twilight);
+        glVertex2f(0, 0);
+        glVertex2f(width, 0);
+        setSkyColor(dayHorizon, warmHorizon, twilight);
+        glVertex2f(width, height);
+        glVertex2f(0, height);
+        glEnd();
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+        glDepthMask(true);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    static void setSkyColor(float[] dayColor, float[] twilightColor, float twilight) {
+        glColor3f(lerp(dayColor[0], twilightColor[0], twilight),
+                lerp(dayColor[1], twilightColor[1], twilight),
+                lerp(dayColor[2], twilightColor[2], twilight));
+    }
+
+    static float smoothStep(float edge0, float edge1, float value) {
+        float t = clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+
+    static void drawCelestialBodies() {
+        double progress = dayProgress();
+        double angle = progress * Math.PI * 2.0;
+        float elevation = (float)Math.sin(angle);
+        float horizontalX = (float)Math.cos(angle);
+        float horizontalZ = (float)Math.sin(angle);
+        float twilight = 1.0f - smoothStep(0.02f, 0.62f, Math.abs(elevation));
+        float starAlpha = twilight * 0.82f;
+
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(false);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glPointSize(2.0f);
+        glBegin(GL_POINTS);
+        for (int i = 0; i < 120; i++) {
+            float azimuth = hash2(i * 73 + 31, i * 131 + 17) * (float)(Math.PI * 2.0);
+            float height = 0.08f + hash2(i * 197 + 7, i * 43 + 53) * 0.88f;
+            float horizontal = (float)Math.sqrt(1.0f - height * height);
+            float twinkle = 0.72f + 0.28f * (float)Math.sin(glfwGetTime() * 2.0 + i * 4.1);
+            glColor4f(0.78f, 0.88f, 1.0f, starAlpha * twinkle);
+            glVertex3f((float)Math.cos(azimuth) * horizontal * 72.0f,
+                    height * 72.0f, (float)Math.sin(azimuth) * horizontal * 72.0f);
+        }
+        glEnd();
+
+        if (elevation > -0.08f) {
+            float[] sunDirection = {horizontalX, Math.max(0.04f, elevation), horizontalZ};
+            normalize(sunDirection);
+            float distance = 72.0f;
+            float centerX = sunDirection[0] * distance;
+            float centerY = sunDirection[1] * distance;
+            float centerZ = sunDirection[2] * distance;
+            float[] cameraRight = {(float)Math.cos(player.yaw), 0.0f,
+                    (float)-Math.sin(player.yaw)};
+            float[] cameraUp = {
+                    (float)(-Math.sin(player.pitch) * Math.sin(player.yaw)),
+                    (float)Math.cos(player.pitch),
+                    (float)(-Math.sin(player.pitch) * Math.cos(player.yaw))
+            };
+            float sunGlow = 1.0f - smoothStep(-0.08f, 0.32f, elevation);
+            drawDisc(centerX, centerY, centerZ, cameraRight, cameraUp, 5.0f,
+                    1.0f, 0.83f + 0.12f * sunGlow, 0.57f + 0.15f * sunGlow, 1.0f);
+        }
+
+        if (elevation < 0.28f) {
+            float[] moonDirection = {-horizontalX, Math.max(0.08f, -elevation), -horizontalZ};
+            normalize(moonDirection);
+            float distance = 70.0f;
+            float centerX = moonDirection[0] * distance;
+            float centerY = moonDirection[1] * distance;
+            float centerZ = moonDirection[2] * distance;
+            float[] cameraRight = {(float)Math.cos(player.yaw), 0.0f,
+                    (float)-Math.sin(player.yaw)};
+            float[] cameraUp = {
+                    (float)(-Math.sin(player.pitch) * Math.sin(player.yaw)),
+                    (float)Math.cos(player.pitch),
+                    (float)(-Math.sin(player.pitch) * Math.cos(player.yaw))
+            };
+            drawMoon(centerX, centerY, centerZ, cameraRight, cameraUp);
+        }
+
+        drawShootingStar();
+        glDisable(GL_BLEND);
+        glDepthMask(true);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    static void normalize(float[] vector) {
+        float length = (float)Math.sqrt(vector[0] * vector[0]
+                + vector[1] * vector[1] + vector[2] * vector[2]);
+        if (length == 0.0f) return;
+        vector[0] /= length;
+        vector[1] /= length;
+        vector[2] /= length;
+    }
+
+    static void drawDisc(float centerX, float centerY, float centerZ,
+                         float[] right, float[] up, float radius,
+                         float red, float green, float blue, float alpha) {
+        glColor4f(red, green, blue, alpha);
+        glBegin(GL_TRIANGLE_FAN);
+        glVertex3f(centerX, centerY, centerZ);
+        for (int i = 0; i <= 32; i++) {
+            double angle = i * Math.PI * 2.0 / 32.0;
+            float offsetX = (float)Math.cos(angle) * radius;
+            float offsetY = (float)Math.sin(angle) * radius;
+            glVertex3f(centerX + right[0] * offsetX + up[0] * offsetY,
+                    centerY + right[1] * offsetX + up[1] * offsetY,
+                    centerZ + right[2] * offsetX + up[2] * offsetY);
+        }
+        glEnd();
+    }
+
+    static void drawMoon(float centerX, float centerY, float centerZ,
+                         float[] right, float[] up) {
+        float radius = 3.0f;
+        drawDisc(centerX, centerY, centerZ, right, up, radius,
+                0.82f, 0.87f, 0.94f, 0.96f);
+        float illumination = moonIllumination(moonPhase());
+        float shadowOffset = radius * illumination * 1.9f;
+        float shadowX = centerX + right[0] * shadowOffset;
+        float shadowY = centerY + right[1] * shadowOffset;
+        float shadowZ = centerZ + right[2] * shadowOffset;
+        drawDisc(shadowX, shadowY, shadowZ, right, up, radius * 0.92f,
+                0.22f, 0.27f, 0.38f, 0.94f);
+    }
+
+    static void drawShootingStar() {
+        double starTime = worldClockSeconds % DAY_LENGTH_SECONDS
+                - DAY_LENGTH_SECONDS * 0.52;
+        if (starTime > 1.1) return;
+        if (starTime < 0.0) return;
+        float progress = (float)(starTime / 1.1);
+        float x = 48.0f - progress * 24.0f;
+        float y = 34.0f + progress * 20.0f;
+        float z = -48.0f;
+        float alpha = (1.0f - progress) * 0.95f;
+        glLineWidth(2.0f);
+        glBegin(GL_LINES);
+        glColor4f(0.55f, 0.72f, 1.0f, alpha * 0.3f);
+        glVertex3f(x + 5.0f, y - 4.0f, z);
+        glColor4f(0.92f, 0.97f, 1.0f, alpha);
+        glVertex3f(x, y, z);
+        glEnd();
+        glLineWidth(1.0f);
     }
 
     static void drawWorld(float aspect) {
@@ -1261,6 +1488,7 @@ public class App {
             for (int z = 0; z < CHUNK_SIZE; z++) {
                 int wx = c.cx * CHUNK_SIZE + x;
                 int wz = c.cz * CHUNK_SIZE + z;
+                Biome biome = biomeAt(wx, wz);
                 int h = terrainHeight(wx, wz);
 
                 for (int y = 0; y < WORLD_HEIGHT; y++) {
@@ -1268,8 +1496,14 @@ public class App {
 
                     if (y == 0) t = BlockType.STONE;
                     else if (y < h - 4) t = BlockType.STONE;
-                    else if (y < h - 1) t = BlockType.DIRT;
-                    else if (y == h - 1) t = (h < 12) ? BlockType.SAND : BlockType.GRASS;
+                    else if (y < h - 1) {
+                        t = biome == Biome.DESERT || biome == Biome.BEACH
+                                ? BlockType.SAND : BlockType.DIRT;
+                    } else if (y == h - 1) {
+                        t = biome == Biome.DESERT || biome == Biome.BEACH
+                                ? BlockType.SAND : (biome == Biome.MOUNTAINS && h > 38
+                                ? BlockType.STONE : BlockType.GRASS);
+                    }
                     else if (y < 10 && h < 10) t = BlockType.WATER;
 
                     setBlock(c, x, y, z, t);
@@ -1281,7 +1515,8 @@ public class App {
                     }
                 }
 
-                if (hash2(wx, wz) > 0.985f && h >= 8 && h < WORLD_HEIGHT - 8) {
+                if (biome == Biome.PLAINS && hash2(wx, wz) > 0.985f
+                        && h >= 8 && h < WORLD_HEIGHT - 8) {
                     placeTree(c, x, h, z);
                 }
             }
@@ -1320,9 +1555,54 @@ public class App {
     }
 
     static int terrainHeight(int wx, int wz) {
-        float h = 22.0f + fbm2d(wx, wz) * 10.0f;
-        h += noise2d(wx * 0.2f, wz * 0.2f) * 3.0f;
-        return clamp((int)h, 6, WORLD_HEIGHT - 4);
+        Biome biome = baseBiomeAt(wx, wz);
+        int height = baseTerrainHeight(wx, wz, biome);
+        if (biome != Biome.MOUNTAINS && height >= 11 && height <= 16
+                && hasNearbyOcean(wx, wz)) {
+            return clamp(height, 11, 13);
+        }
+        return height;
+    }
+
+    static Biome biomeAt(int wx, int wz) {
+        Biome base = baseBiomeAt(wx, wz);
+        if (base == Biome.MOUNTAINS) return base;
+        int height = baseTerrainHeight(wx, wz, base);
+        if (height >= 11 && height <= 16 && hasNearbyOcean(wx, wz)) return Biome.BEACH;
+        return base;
+    }
+
+    static Biome baseBiomeAt(int wx, int wz) {
+        float region = noise2d(wx * 0.0045f + 217.0f, wz * 0.0045f - 91.0f);
+        if (region > 0.28f) return Biome.MOUNTAINS;
+        if (region < -0.28f) return Biome.DESERT;
+        return Biome.PLAINS;
+    }
+
+    static int baseTerrainHeight(int wx, int wz, Biome biome) {
+        float broad = fbm2d(wx, wz);
+        float detail = noise2d(wx * 0.12f, wz * 0.12f);
+        float height;
+        switch (biome) {
+            case MOUNTAINS:
+                float ridge = 1.0f - Math.abs(noise2d(wx * 0.018f, wz * 0.018f));
+                height = 25.0f + broad * 12.0f + ridge * 15.0f + detail * 2.0f;
+                break;
+            case DESERT:
+                height = 16.0f + broad * 4.5f + detail * 1.4f;
+                break;
+            default:
+                height = 19.0f + broad * 3.0f + detail * 0.9f;
+                break;
+        }
+        return clamp((int)height, 6, WORLD_HEIGHT - 4);
+    }
+
+    static boolean hasNearbyOcean(int wx, int wz) {
+        return baseTerrainHeight(wx + 5, wz, baseBiomeAt(wx + 5, wz)) <= 10
+                || baseTerrainHeight(wx - 5, wz, baseBiomeAt(wx - 5, wz)) <= 10
+                || baseTerrainHeight(wx, wz + 5, baseBiomeAt(wx, wz + 5)) <= 10
+                || baseTerrainHeight(wx, wz - 5, baseBiomeAt(wx, wz - 5)) <= 10;
     }
 
     static float fbm2d(float x, float z) {
