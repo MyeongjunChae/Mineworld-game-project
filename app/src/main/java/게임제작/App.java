@@ -32,7 +32,10 @@ public class App {
     static final int BIOME_REGION_SIZE = 80;
     static final int POND_CELL_SIZE = 72;
     static final int POND_WATER_LEVEL = 14;
-    static final int PIXEL_SCALE = 3;
+    static final int PIXEL_SCALE = 2;
+    static final int UI_PIXEL_SCALE = 3;
+    static final int OPTIONS_VERSION = 2;
+    static final float PIXEL_TEXT_SCALE = 1.18f;
     static final int RENDER_DISTANCE = 6;
     static final int CHUNK_MESH_BUILD_BUDGET = 2;
     static final float VIEW_DISTANCE = 64.0f;
@@ -452,8 +455,8 @@ public class App {
     static Screen optionsReturnScreen = Screen.TITLE;
     static int menuSelection;
     static int selectedSaveIndex = -1;
-    static int menuViewportWidth = SCREEN_W / PIXEL_SCALE;
-    static int menuViewportHeight = SCREEN_H / PIXEL_SCALE;
+    static int menuViewportWidth = SCREEN_W / UI_PIXEL_SCALE;
+    static int menuViewportHeight = SCREEN_H / UI_PIXEL_SCALE;
     static int pixelScale = PIXEL_SCALE;
     static float mouseSensitivity = MOUSE_SENSITIVITY;
     static float spawnX = 8.5f;
@@ -1090,8 +1093,10 @@ public class App {
         int height = Math.max(1, framebufferHeight[0]);
         int renderWidth = Math.max(1, (width + pixelScale - 1) / pixelScale);
         int renderHeight = Math.max(1, (height + pixelScale - 1) / pixelScale);
-        menuViewportWidth = renderWidth;
-        menuViewportHeight = renderHeight;
+        int uiWidth = Math.max(1, (width + UI_PIXEL_SCALE - 1) / UI_PIXEL_SCALE);
+        int uiHeight = Math.max(1, (height + UI_PIXEL_SCALE - 1) / UI_PIXEL_SCALE);
+        menuViewportWidth = uiWidth;
+        menuViewportHeight = uiHeight;
         glViewport(0, 0, renderWidth, renderHeight);
         float aspect = (float) width / (float) height;
         setPerspective(70.0f, aspect, 0.1f, 1000.0f);
@@ -1109,12 +1114,18 @@ public class App {
         if (screen == Screen.GAME || screen == Screen.PAUSED
                 || screen == Screen.INVENTORY || screen == Screen.CRAFTING) {
             drawHeldItem();
-            drawHud(renderWidth, renderHeight);
-        }
-        if (screen != Screen.GAME) {
-            drawMenuUi(renderWidth, renderHeight);
         }
         drawPixelArtFrame(width, height, renderWidth, renderHeight);
+
+        // Keep the world pixelated, but draw labels and menus at framebuffer resolution.
+        glViewport(0, 0, width, height);
+        if (screen == Screen.GAME || screen == Screen.PAUSED
+                || screen == Screen.INVENTORY || screen == Screen.CRAFTING) {
+            drawHud(uiWidth, uiHeight);
+        }
+        if (screen != Screen.GAME) {
+            drawMenuUi(uiWidth, uiHeight);
+        }
     }
 
     static void drawPixelArtFrame(int width, int height, int renderWidth, int renderHeight) {
@@ -2306,10 +2317,10 @@ public class App {
         drawMenuButton(width, "MOUSE SENSITIVITY  "
                 + String.format("%.2fX", sensitivityMultiplier), "option_mouse",
                 panelY + 65.0f);
-        drawMenuButton(width, "PIXEL SCALE  " + pixelScale + "X", "option_pixel",
+        drawMenuButton(width, "WORLD DETAIL  " + pixelScale + "X", "option_pixel",
                 panelY + 97.0f);
         drawMenuButton(width, "BACK", "back", panelY + 139.0f);
-        drawCenteredPixelText("ARROWS CHANGE SELECTED OPTION", width * 0.5f,
+        drawCenteredPixelText("LEFT/RIGHT: LOWER = SHARPER", width * 0.5f,
                 panelY + panelHeight - 17.0f, 0.62f, 0.62f, 0.70f, 0.76f, 1.0f);
     }
 
@@ -2593,7 +2604,8 @@ public class App {
     }
 
     static float pixelTextWidth(String text, float scale) {
-        return Math.max(0.0f, text.length() * 6.0f * scale - scale);
+        float readableScale = scale * PIXEL_TEXT_SCALE;
+        return Math.max(0.0f, text.length() * 6.0f * readableScale - readableScale);
     }
 
     static void drawCenteredPixelText(String text, float centerX, float y,
@@ -2604,6 +2616,14 @@ public class App {
 
     static void drawPixelText(String text, float x, float y, float scale,
                               float red, float green, float blue, float alpha) {
+        float glyphScale = scale * PIXEL_TEXT_SCALE;
+        drawPixelTextGlyphs(text, x + 0.55f, y + 0.55f, glyphScale,
+                0.015f, 0.02f, 0.025f, alpha * 0.88f);
+        drawPixelTextGlyphs(text, x, y, glyphScale, red, green, blue, alpha);
+    }
+
+    static void drawPixelTextGlyphs(String text, float x, float y, float scale,
+                                   float red, float green, float blue, float alpha) {
         glColor4f(red, green, blue, alpha);
         glBegin(GL_QUADS);
         for (int index = 0; index < text.length(); index++) {
@@ -2825,18 +2845,27 @@ public class App {
     static void loadOptions() {
         if (!Files.isRegularFile(OPTIONS_PATH)) return;
         Properties options = new Properties();
+        boolean migrateOptions = false;
         try (var input = Files.newInputStream(OPTIONS_PATH)) {
             options.load(input);
             mouseSensitivity = clamp(Float.parseFloat(
                     options.getProperty("mouseSensitivity", Float.toString(MOUSE_SENSITIVITY))),
                     0.00025f, 0.0030f);
-            pixelScale = clamp(Integer.parseInt(options.getProperty("pixelScale",
-                    Integer.toString(PIXEL_SCALE))), 1, 5);
+            int savedPixelScale = Integer.parseInt(options.getProperty("pixelScale",
+                    Integer.toString(PIXEL_SCALE)));
+            int optionsVersion = Integer.parseInt(options.getProperty("optionsVersion", "1"));
+            pixelScale = clamp(savedPixelScale, 1, 5);
+            if (optionsVersion < OPTIONS_VERSION) {
+                // Version 1 used 3X as the default; move that default to the sharper 2X mode.
+                if (savedPixelScale == 3) pixelScale = PIXEL_SCALE;
+                migrateOptions = true;
+            }
         } catch (IOException | NumberFormatException e) {
             System.err.println("Could not load options: " + e.getMessage());
             mouseSensitivity = MOUSE_SENSITIVITY;
             pixelScale = PIXEL_SCALE;
         }
+        if (migrateOptions) saveOptions();
     }
 
     static void initializeSaveStorage() {
@@ -2859,6 +2888,7 @@ public class App {
 
     static void saveOptions() {
         Properties options = new Properties();
+        options.setProperty("optionsVersion", Integer.toString(OPTIONS_VERSION));
         options.setProperty("mouseSensitivity", Float.toString(mouseSensitivity));
         options.setProperty("pixelScale", Integer.toString(pixelScale));
         try {
