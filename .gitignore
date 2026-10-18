@@ -3,3 +3,6 @@
 
 # Ignore Gradle build output directory
 build
+
+# Local save files created while running the game
+app/.mineworld-game-project/
